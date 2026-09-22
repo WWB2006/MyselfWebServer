@@ -11,5 +11,12 @@ add_executable(webserver
     src/main.cpp
     src/net/Socket.cpp
     src/util/Version.cpp
+    src/net/Acceptor.cpp
+    src/net/Buffer.cpp
+    src/net/Channel.cpp
+    src/net/Epoller.cpp
+    src/net/EventLoop.cpp
+    src/net/TcpConnection.cpp
+    src/util/Version.cpp
 )
 target_include_directories(webserver PRIVATE include)
