@@ -34,6 +34,8 @@ bool Epoller::add(Channel* channel) {
                   << " failed: " << std::strerror(errno) << "\n";
         return false;
     }
+    std::cerr << "[epoller] add OK fd=" << channel->fd()
+              << " events=" << event.events << "\n";   // ← 加这行
     return true;
 }
 

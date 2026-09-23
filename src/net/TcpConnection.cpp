@@ -32,9 +32,12 @@ TcpConnection::~TcpConnection() {
 }
 
 void TcpConnection::start() {
-    // 让 Channel 在回调期间持有本对象的 shared_ptr，避免回调中对象被销毁
+    std::cerr << "[start] fd=" << channel_.fd() << " events=" << channel_.events() << "\n";
     channel_.tie(shared_from_this());
     channel_.enableReading();
+    std::cerr << "[start] after enableReading events=" << channel_.events() << "\n";
+    loop_->updateChannel(&channel_);
+    std::cerr << "[start] updateChannel done fd=" << channel_.fd() << "\n";
 }
 
 void TcpConnection::send(const std::string& data) {
@@ -78,6 +81,7 @@ void TcpConnection::forceClose() {
 }
 
 void TcpConnection::handleRead() {
+    std::cerr << "[handleRead] fd=" << socket_.fd() << " called\n";   // ← 加这行
     int savedErrno = 0;
     bool peerClosed = false;
 

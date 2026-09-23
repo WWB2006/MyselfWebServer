@@ -1,5 +1,5 @@
 #include "myself/net/Socket.h"
-
+#include <iostream>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -22,6 +22,7 @@ std::runtime_error sysError(const std::string& what) {
 }  // namespace
 
 Socket::~Socket() {
+    std::cerr << "[~Socket] fd=" << fd_ << "\n";   // ← 加这行
     close();
 }
 
@@ -91,6 +92,7 @@ Socket Socket::listenOn(const std::string& ip, int port, int backlog) {
     if (::listen(sock.fd(), backlog) < 0) {
         throw sysError("listen");
     }
+    sock.setNonBlocking(true);   // ← 加这行
     return sock;
 }
 

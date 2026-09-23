@@ -18,5 +18,11 @@ add_executable(webserver
     src/net/EventLoop.cpp
     src/net/TcpConnection.cpp
     src/util/Version.cpp
+    src/http/HttpParser.cpp
+    src/http/HttpRequest.cpp
+    src/http/HttpResponse.cpp
+    src/http/Router.cpp
+    src/util/Version.cpp
+ 
 )
 target_include_directories(webserver PRIVATE include)
