@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "myself/net/Buffer.h"
 #include "myself/net/Channel.h"
@@ -15,6 +16,7 @@ class EventLoop;
 
 /// 一条 TCP 连接：持有 socket、Channel 与收发缓冲区。
 /// 生命周期用 shared_ptr 管理，回调期间通过 Channel::tie 保活。
+/// 所有成员函数都必须在连接所属的 IO 线程调用（阶段 4 起）。
 class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
 public:
     using MessageCallback =
@@ -44,6 +46,9 @@ public:
     uint16_t peerPort() const { return peerPort_; }
     bool connected() const { return !closed_; }
 
+    /// 该连接所属的事件循环。跨线程投递任务时用它回到正确的 IO 线程。
+    EventLoop* loop() const { return loop_; }
+
 private:
     void handleRead();
     void handleWrite();
@@ -64,4 +69,3 @@ private:
 };
 
 }  // namespace myself
-

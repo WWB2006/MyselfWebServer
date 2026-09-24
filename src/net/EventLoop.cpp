@@ -1,36 +1,124 @@
 #include "myself/net/EventLoop.h"
 
+#include <sys/eventfd.h>
+#include <unistd.h>
+
+#include <cstdlib>
 #include <iostream>
+#include <stdexcept>
+#include <utility>
 
 #include "myself/net/Channel.h"
 #include "myself/net/Epoller.h"
 
 namespace myself {
 
-EventLoop::EventLoop() : epoller_(std::make_unique<Epoller>()) {}
+EventLoop::EventLoop()
+    : epoller_(std::make_unique<Epoller>()), threadId_(std::this_thread::get_id()) {
+    // eventfd 作为唤醒通道：其他线程投递任务时写 8 字节，让 epoll_wait 立即返回
+    wakeupFd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (wakeupFd_ < 0) {
+        throw std::runtime_error("eventfd: failed to create wakeup fd");
+    }
 
-EventLoop::~EventLoop() = default;
+    wakeupChannel_ = std::make_unique<Channel>(this, wakeupFd_);
+    wakeupChannel_->setReadCallback([this] { handleWakeup(); });
+    wakeupChannel_->enableReading();
+}
 
-void EventLoop::loop(int timeoutMs) {
-    quit_ = false;
-    while (!quit_) {
-        std::cerr << "[loop] waiting...\n";   // ← 加这行，看有没有在循环
-        const int count = epoller_->wait(timeoutMs);
-        if (count < 0) {
-            continue;  // 被信号打断，继续等待
-        }
-        if(count>0){
-            std::cerr << "[loop] epoll_wait returned " << count << "\n";   // ← 加这行
-        }
-        dispatch(epoller_->events(), count);
+EventLoop::~EventLoop() {
+    if (wakeupChannel_) {
+        wakeupChannel_->disableAll();
+        wakeupChannel_->remove();
+    }
+    if (wakeupFd_ >= 0) {
+        ::close(wakeupFd_);
+        wakeupFd_ = -1;
     }
 }
 
-void EventLoop::dispatch(const std::vector<epoll_event>& events, int count) {
-    if (count > 0) {
-        std::cerr << "[dispatch] count=" << count
-                  << " fd=" << events[0].data.fd << "\n";   // ← 加这行
+void EventLoop::loop(int timeoutMs) {
+    assertInLoopThread();
+    quit_.store(false);
+
+    while (!quit_.load()) {
+        const int count = epoller_->wait(timeoutMs);
+        if (count > 0) {
+            dispatch(epoller_->events(), count);
+        }
+        doPendingFunctors();  // 每轮都处理跨线程投递的任务
     }
+}
+
+void EventLoop::quit() {
+    quit_.store(true);
+    if (!isInLoopThread()) {
+        wakeup();  // 其他线程调用时，把阻塞在 epoll_wait 的循环叫醒
+    }
+}
+
+void EventLoop::runInLoop(Functor cb) {
+    if (isInLoopThread()) {
+        cb();
+    } else {
+        queueInLoop(std::move(cb));
+    }
+}
+
+void EventLoop::queueInLoop(Functor cb) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pendingFunctors_.push_back(std::move(cb));
+    }
+    // 非本线程，或正在执行待办任务（可能又投递了新任务）时需要唤醒
+    if (!isInLoopThread() || callingPendingFunctors_.load()) {
+        wakeup();
+    }
+}
+
+void EventLoop::assertInLoopThread() const {
+    if (isInLoopThread()) {
+        return;
+    }
+    std::cerr << "[loop:" << (name_.empty() ? "unnamed" : name_)
+              << "] fatal: operation must run in its own thread\n";
+    std::abort();
+}
+
+void EventLoop::wakeup() {
+    const uint64_t one = 1;
+    const ssize_t n = ::write(wakeupFd_, &one, sizeof(one));
+    (void)n;  // eventfd 非阻塞写，失败说明已有待处理唤醒，可以忽略
+}
+
+void EventLoop::handleWakeup() {
+    uint64_t value = 0;
+    while (::read(wakeupFd_, &value, sizeof(value)) > 0) {
+        // 读空为止，避免残留计数导致后续空转
+    }
+}
+
+void EventLoop::doPendingFunctors() {
+    std::vector<Functor> functors;
+    callingPendingFunctors_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        functors.swap(pendingFunctors_);
+    }
+    for (const auto& functor : functors) {
+        if (functor) {
+            functor();
+        }
+    }
+    callingPendingFunctors_.store(false);
+}
+
+size_t EventLoop::pendingTaskCount() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pendingFunctors_.size();
+}
+
+void EventLoop::dispatch(const std::vector<epoll_event>& events, int count) {
     for (int i = 0; i < count; ++i) {
         const int fd = events[static_cast<size_t>(i)].data.fd;
         auto it = channels_.find(fd);
@@ -45,15 +133,15 @@ void EventLoop::dispatch(const std::vector<epoll_event>& events, int count) {
 }
 
 void EventLoop::updateChannel(Channel* channel) {
+    assertInLoopThread();
+
     const int fd = channel->fd();
     auto it = channels_.find(fd);
     if (it == channels_.end()) {
         if (channel->isNoneEvent()) {
-            std::cerr << "[updateChannel] fd=" << fd << " isNoneEvent, skip\n";
             return;
         }
         channels_[fd] = channel;
-        std::cerr << "[updateChannel] ADD fd=" << fd << " events=" << channel->events() << "\n";
         epoller_->add(channel);
         ++channelCount_;
         return;
@@ -66,6 +154,8 @@ void EventLoop::updateChannel(Channel* channel) {
 }
 
 void EventLoop::removeChannel(Channel* channel) {
+    assertInLoopThread();
+
     const int fd = channel->fd();
     auto it = channels_.find(fd);
     if (it == channels_.end()) {
@@ -77,4 +167,3 @@ void EventLoop::removeChannel(Channel* channel) {
 }
 
 }  // namespace myself
-
