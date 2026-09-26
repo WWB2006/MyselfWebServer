@@ -9,14 +9,12 @@
 #include "myself/net/Buffer.h"
 #include "myself/net/Channel.h"
 #include "myself/net/Socket.h"
+#include "myself/timer/Timer.h"
 
 namespace myself {
 
 class EventLoop;
 
-/// 一条 TCP 连接：持有 socket、Channel 与收发缓冲区。
-/// 生命周期用 shared_ptr 管理，回调期间通过 Channel::tie 保活。
-/// 所有成员函数都必须在连接所属的 IO 线程调用（阶段 4 起）。
 class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
 public:
     using MessageCallback =
@@ -32,21 +30,18 @@ public:
     void setMessageCallback(MessageCallback cb) { messageCallback_ = std::move(cb); }
     void setCloseCallback(CloseCallback cb) { closeCallback_ = std::move(cb); }
 
-    /// 注册读事件，开始接收数据。
     void start();
-
-    /// 发送数据；写不完的部分进入输出缓冲区并注册写事件。
     void send(const std::string& data);
-
     void shutdownWrite();
     void forceClose();
+
+    /// 设置空闲超时（秒）；<=0 表示关闭。必须在所属 IO 线程调用。
+    void setIdleTimeout(double seconds);
 
     int fd() const { return socket_.fd(); }
     const std::string& peerIp() const { return peerIp_; }
     uint16_t peerPort() const { return peerPort_; }
     bool connected() const { return !closed_; }
-
-    /// 该连接所属的事件循环。跨线程投递任务时用它回到正确的 IO 线程。
     EventLoop* loop() const { return loop_; }
 
 private:
@@ -55,6 +50,8 @@ private:
     void handleClose();
     void handleError();
     void sendInLoop(const std::string& data);
+    void refreshIdleTimer();
+    void handleIdleTimeout();
 
     EventLoop* loop_;
     Socket socket_;
@@ -64,6 +61,8 @@ private:
     std::string peerIp_;
     uint16_t peerPort_;
     bool closed_{false};
+    double idleTimeoutSeconds_{0};
+    TimerId idleTimer_;
     MessageCallback messageCallback_;
     CloseCallback closeCallback_;
 };

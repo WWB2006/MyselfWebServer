@@ -12,10 +12,14 @@
 #include <utility>
 #include <vector>
 
+#include "myself/timer/Timer.h"
+#include "myself/util/Timestamp.h"
+
 namespace myself {
 
 class Channel;
 class Epoller;
+class TimerQueue;
 
 /// Reactor 事件循环。
 /// 阶段 2 的单线程用法保持不变；阶段 4 起支持跨线程投递任务，
@@ -49,6 +53,18 @@ public:
     size_t channelCount() const { return channelCount_; }
     size_t pendingTaskCount();
 
+    // ---------------------------------------------------------------- 定时器
+    /// 在指定时刻执行一次。
+    TimerId runAt(Timestamp when, TimerCallback callback);
+    /// 延迟 delaySeconds 秒后执行一次。
+    TimerId runAfter(double delaySeconds, TimerCallback callback);
+    /// 每隔 intervalSeconds 秒执行一次，直到取消。
+    TimerId runEvery(double intervalSeconds, TimerCallback callback);
+    /// 取消定时器；可在任意线程调用。
+    void cancelTimer(TimerId timerId);
+    /// 当前定时器数量（只应在循环线程调用）。
+    size_t timerCount() const;
+
     /// 线程名：只用于日志与调试，创建后到 loop() 之前设置。
     void setName(std::string name) { name_ = std::move(name); }
     const std::string& name() const { return name_; }
@@ -60,6 +76,7 @@ private:
     void doPendingFunctors();
 
     std::unique_ptr<Epoller> epoller_;
+    std::unique_ptr<TimerQueue> timerQueue_;
     std::unique_ptr<Channel> wakeupChannel_;
     int wakeupFd_{-1};
     std::map<int, Channel*> channels_;

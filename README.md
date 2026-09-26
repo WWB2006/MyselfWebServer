@@ -504,4 +504,339 @@ git commit -m "docs: add adr for http parser state machine"
 git push
 ```
 
+# 阶段 4：主从 Reactor 与线程池 —— 放置说明
+
+## 一、文件放置位置
+
+| 本目录文件 | 仓库中的位置 | 说明 |
+| --- | --- | --- |
+| include/myself/net/EventLoop.h | 同路径覆盖 | 增加跨线程投递与唤醒通道 |
+| src/net/EventLoop.cpp | 同路径覆盖 | 用 eventfd 唤醒，去掉临时调试打印 |
+| include/myself/net/EventLoopThread.h | 新增 | 一个线程 + 一个事件循环 |
+| src/net/EventLoopThread.cpp | 新增 | 线程内创建并运行 EventLoop |
+| include/myself/net/EventLoopThreadPool.h | 新增 | 主从 Reactor 的“从”部分 |
+| src/net/EventLoopThreadPool.cpp | 新增 | 轮询分配连接 |
+| include/myself/thread/ThreadPool.h | 新增 | 通用计算线程池 |
+| src/thread/ThreadPool.cpp | 新增 | 任务队列 + 条件变量 |
+| include/myself/net/TcpConnection.h | 同路径覆盖 | 只增加一个 `loop()` 访问器，用于退出时回到正确线程关闭连接 |
+| src/main.cpp | 同路径覆盖 | 主线程 accept，IO 线程读写，worker 线程处理耗时任务 |
+| CMakeLists.txt | 同路径覆盖 | 加入新源文件、去重 Version.cpp、链接 Threads |
+| docs/adr/0003-main-sub-reactor.md | docs/adr/ | 决策记录 |
+| docs/stage-4-验收记录.md | docs/ | 环境、命令、压测对比表 |
+
+## 二、构建与运行
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+
+./build/webserver -t 0 -p 8080          # 单线程基线（阶段 3 行为）
+./build/webserver -t 4 -p 8080          # 4 个 IO 线程
+./build/webserver -t 4 -w 4 -p 8080     # 再加 4 个 worker 线程
+```
+
+功能验证：
+
+```bash
+curl -i http://127.0.0.1:8080/index.html
+curl -s http://127.0.0.1:8080/api/status      # 返回 ioThreads / workerThreads
+grep Threads /proc/$(pgrep webserver)/status  # 线程数核对
+```
+
+观察连接是否分散到多个 IO 线程：
+
+```bash
+for i in 1 2 3 4 5 6; do (nc 127.0.0.1 8080 &) ; done
+# 服务端日志里应出现 -> io-0、io-1、io-2、io-3 中的多个
+```
+
+## 三、压测对比（阶段 4 的核心产出）
+
+压测客户端一定要放在宿主机或另一台机器上，和服务器挤在同一台虚拟机会互相抢 CPU，
+数据没有说服力。
+
+```bash
+# 基线
+./build/webserver -t 0 -p 8080
+wrk -t4 -c200 -d60s --latency http://<虚拟机IP>:8080/index.html
+
+# 多 IO 线程
+./build/webserver -t 4 -p 8080
+wrk -t4 -c200 -d60s --latency http://<虚拟机IP>:8080/index.html
+
+# 多 IO 线程 + worker 池
+./build/webserver -t 4 -w 4 -p 8080
+wrk -t4 -c200 -d60s --latency http://<虚拟机IP>:8080/index.html
+```
+
+把三组数据填进 `docs/stage-4-验收记录.md` 的压测表，并写一句结论（提升多少、瓶颈在哪）。
+
+## 四、这一版代码的关键点
+
+1. **连接绑定 IO 线程**：连接对象在它所属的 IO 线程里创建、注册、读写与销毁；
+   跨线程注册事件会命中 `assertInLoopThread()` 直接终止，这是有意为之。
+2. **eventfd 唤醒**：`runInLoop` 从其他线程投递任务时写 8 字节，让 `epoll_wait` 立刻返回；
+   否则任务要等到下一次事件才执行。
+3. **线程归属断言**：`updateChannel` / `removeChannel` 只允许在循环线程调用，
+   把“偶发崩溃”变成“立即暴露”。
+4. **worker 线程不碰 socket**：worker 只做文件读取与响应构造，写回通过
+   `ioLoop->runInLoop` 回到 IO 线程，这是多线程服务器最容易写错的地方。
+5. **连接表加锁**：accept 在主线程插入、close 在 IO 线程删除，必须用互斥量保护。
+6. **CMake 必须链接 Threads**：漏掉会报 `undefined reference to pthread_create`。
+7. **退出顺序**：先 `registry.closeAll()` 把每条连接交回它所属的 IO 线程关闭，再回收线程池；
+   否则连接对象会在主线程析构，析构里调用 `disableAll()` 命中线程归属断言直接终止进程。
+8. **去掉了调试打印**：你原来的 `EventLoop.cpp` 里有 `[loop] waiting...`、`[dispatch]` 等临时输出，
+   这一版换成了按需的 `EventLoop::name()` 日志；需要重新排查时用线程名定位即可。
+9. **CMake 顺手清理**：原来的源文件列表里 `src/util/Version.cpp` 出现了三次，这一版去重了。
+
+## 五、本机无法编译，已做的人工自查
+
+我这边只有 Windows 工具链（没有 epoll/eventfd 头文件），所以**没有编译验证**，下面是逐项核对过的内容：
+
+| 检查项 | 结论 |
+| --- | --- |
+| 新增文件是否都写进 CMakeLists | 是，EventLoopThread、EventLoopThreadPool、ThreadPool 均已加入 |
+| 是否链接线程库 | 是，`find_package(Threads)` + `Threads::Threads` |
+| 头文件自洽 | EventLoop 增加 `<utility>`，EventLoopThreadPool.cpp 增加 `<utility>`，TcpConnection.h 增加 `<utility>` |
+| 跨线程访问 | 连接表加锁；socket 只在所属 IO 线程读写；worker 线程只做文件读取与响应构造 |
+| 退出路径 | registry.closeAll() → 各连接回到自己的 IO 线程关闭 → 线程池析构 quit + join |
+| 生命周期 | 连接创建、注册、关闭都通过 `runInLoop` 保证在同一线程；`Channel::tie` 保证回调期间对象存活 |
+
+如果编译报错，把完整报错贴给我；常见的第一批问题是：忘了把新文件加进 CMakeLists、
+漏链接 Threads、或者把 `send()` 直接写在了 worker 线程里。
+
+## 六、验收标准
+
+1. `-t 0` 与阶段 3 行为一致，`-t 4` 时连接分散到多个 IO 线程；
+2. `curl` 的 200 / 404 / `/api/status` 全部正常；
+3. 三组压测数据齐全，结论能解释瓶颈；
+4. ThreadSanitizer 或 helgrind 跑一轮无数据竞争报告；
+5. 压测结束后没有残留连接与 fd 泄漏；
+6. 能回答：为什么连接必须绑定固定的 IO 线程、eventfd 解决什么问题、worker 线程为什么不能直接 `send`。
+
+## 七、提交
+
+```bash
+git checkout -b stage4-threadpool
+git add CMakeLists.txt include src
+git commit -m "feat: 阶段4 主从 Reactor 与线程池"
+git add docs/adr/0003-main-sub-reactor.md docs/stage-4-验收记录.md
+git commit -m "docs: 阶段4 决策记录与验收记录"
+git push -u origin stage4-threadpool
+```
+
+## 八、README 需要同步的改动
+
+把阶段进度表里的阶段 4 一行改成：
+
+```
+| 4 | 线程池与主从 Reactor | 已完成 |
+```
+
+并在“设计决策”一节追加：
+
+```
+- [ADR 0003：主从 Reactor 与线程池](docs/adr/0003-main-sub-reactor.md)
+```
+
+# 阶段 5：定时器与空闲连接超时 —— 放置说明
+
+## 一、文件放置位置
+
+| 本目录文件 | 仓库中的位置 | 说明 |
+| --- | --- | --- |
+| include/myself/util/Timestamp.h | 新增 | 单调时钟封装与毫秒换算（header-only） |
+| include/myself/timer/Timer.h | 新增 | TimerId 句柄与 Timer 定义 |
+| src/timer/Timer.cpp | 新增 | 序号自增与重复定时器重排 |
+| include/myself/timer/TimerQueue.h | 新增 | 定时器队列（只在 loop 线程访问内部状态） |
+| src/timer/TimerQueue.cpp | 新增 | 插入、取消、最近到期时间与到期处理 |
+| include/myself/net/EventLoop.h | 同路径覆盖 | 增加 runAt/runAfter/runEvery/cancelTimer 与 TimerQueue 成员 |
+| src/net/EventLoop.cpp | 同路径覆盖 | 用最近到期时间作为 epoll_wait 超时；每轮处理到期定时器 |
+| include/myself/net/TcpConnection.h | 同路径覆盖 | 增加 setIdleTimeout 与空闲定时器成员 |
+| src/net/TcpConnection.cpp | 同路径覆盖 | 空闲计时刷新、超时关闭、关闭时取消定时器（并去掉你的调试打印） |
+| src/main.cpp | 同路径覆盖 | 新增 `-i` 参数、周期统计 runEvery、状态接口补充字段 |
+| CMakeLists.txt | 同路径覆盖 | 加入 timer 模块两个源文件 |
+| docs/adr/0004-timer-design.md | docs/adr/ | 决策记录 |
+| docs/stage-5-验收记录.md | docs/ | 环境、功能验收、精度与吞吐对比 |
+
+## 二、构建与运行
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j"$(nproc)"
+
+./build/webserver -t 4 -p 8080            # 不启用空闲超时
+./build/webserver -t 4 -i 5 -p 8080       # 空闲 5 秒断开
+```
+
+## 三、验证
+
+```bash
+# 1. 空闲超时：连上不输入，5 秒左右被服务端断开
+nc 127.0.0.1 8080
+# 服务端应打印：[timeout] fd=... idle over 5s, closing
+
+# 2. 有数据往来不误杀：每 2 秒发一行，持续 20 秒
+while true; do echo hello; sleep 2; done | nc 127.0.0.1 8080
+
+# 3. 周期任务：每 10 秒打印一次统计
+# [stats] online=..., timers=..., up=...s
+
+# 4. 状态接口
+curl -s http://127.0.0.1:8080/api/status
+
+# 5. 定时器取消：短连接请求后立即断开，等待超时时间，不应出现该 fd 的 [timeout]
+curl -s http://127.0.0.1:8080/index.html
+```
+
+## 四、这一版代码的关键点
+
+1. **定时精度来自 epoll_wait 超时**：`EventLoop::loop` 每轮向 `TimerQueue` 要"最近还有多少毫秒"，
+   没有定时器时返回 -1（一直阻塞），已经到期返回 0（立刻处理）。
+2. **时间用单调时钟**：`steady_clock` 不受系统时间调整影响；日志里用相对启动的毫秒数，便于阅读。
+3. **TimerQueue 不做内部加锁**：所有状态只在循环线程访问，跨线程调用通过 `runInLoop` 转发，
+   并借助阶段 4 的 eventfd 立即唤醒循环。
+4. **重复定时器先重排再执行**：这样回调里取消自己也能被正确移除，不会留下幽灵任务。
+5. **TimerId 带 owner 指针**：拿别的队列的句柄来取消会被忽略，避免误删同序号的其他任务。
+6. **空闲超时只持弱引用**：`weak_ptr` + 关闭时 `cancelTimer`，双保险避免回调访问已销毁的连接。
+7. **统计用原子变量**：定时器任务在 main 线程更新计数，`/api/status` 可能在任意 IO 线程读取，
+   所以用 `std::atomic<size_t>` 而不是普通变量。
+8. **去掉了调试打印**：`TcpConnection.cpp` 里原来的 `[handleRead] fd=... called` 已删除。
+
+## 五、验收标准
+
+1. `-i 5` 时空闲连接在 5 秒左右被断开，日志有 `[timeout]`；
+2. 有数据往来时不会被误杀，主动断开立即关闭；
+3. 关闭超时功能（不带 `-i`）时行为与阶段 4 一致；
+4. `/api/status` 返回 `idleTimeoutSeconds` 与 `timers` 字段；
+5. 每 10 秒输出一次 `[stats]`，说明 `runEvery` 可用；
+6. 压测数据与阶段 4 基线对比，QPS 下降在可解释范围内；
+7. 能回答：为什么用 epoll_wait 超时而不是 timerfd、TimerQueue 为什么不加锁、
+   重复定时器为什么先重排再执行。
+
+## 六、提交
+
+```bash
+git checkout -b stage5-timer
+git add CMakeLists.txt include src
+git commit -m "feat: 阶段5 定时器与空闲连接超时"
+git add docs/adr/0004-timer-design.md docs/stage-5-验收记录.md
+git commit -m "docs: 阶段5 决策记录与验收记录"
+git push -u origin stage5-timer
+```
+
+## 七、README 需要同步的改动
+
+阶段进度表：
+
+```
+| 5 | 定时器与空闲连接超时 | 已完成 |
+```
+
+设计决策一节追加：
+
+```
+- [ADR 0004：定时器与空闲连接超时](docs/adr/0004-timer-design.md)
+```
+
+# 阶段 6：日志系统 —— 放置说明
+
+## 一、文件放置位置
+
+| 本目录文件 | 仓库中的位置 | 说明 |
+| --- | --- | --- |
+| include/myself/log/LogStream.h、src/log/LogStream.cpp | 新增 | 栈上固定缓冲与类型输出，零分配 |
+| include/myself/log/Logger.h、src/log/Logger.cpp | 新增 | 级别、时间戳、线程 id、LOG_* 宏 |
+| include/myself/log/LogFile.h、src/log/LogFile.cpp | 新增 | 追加写文件，按大小与日期轮转 |
+| include/myself/log/AsyncLogging.h、src/log/AsyncLogging.cpp | 新增 | 后台线程 + 双缓冲，批量落盘 |
+| src/main.cpp | 同路径覆盖 | 日志初始化、`-l/-g/-s/-q` 参数、全部输出改为 LOG_* |
+| src/net/EventLoop.cpp | 同路径覆盖 | 线程归属断言改为 LOG_ERROR |
+| src/net/Epoller.cpp | 同路径覆盖 | 3 处错误改为 LOG_ERROR，去掉 add OK 调试打印 |
+| src/net/Acceptor.cpp | 同路径覆盖 | 监听与 accept 失败改为 LOG_INFO/LOG_ERROR |
+| src/net/EventLoopThreadPool.cpp | 同路径覆盖 | 线程池启动改为 LOG_INFO |
+| src/net/TcpConnection.cpp | 同路径覆盖 | 超时/读写错误改为 LOG_*，删掉 3 行 [start] 调试打印 |
+| src/thread/ThreadPool.cpp | 同路径覆盖 | 启动与任务异常改为 LOG_* |
+| CMakeLists.txt | 同路径覆盖 | 加入 log 模块 4 个源文件 |
+| docs/adr/0005-logging-design.md | docs/adr/ | 决策记录 |
+| docs/stage-6-验收记录.md | docs/ | 级别过滤、轮转、QPS 影响对比 |
+
+## 二、构建与运行
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j"$(nproc)"
+
+./build/webserver -t 4 -p 8080                          # 默认 info 级别，只输出控制台
+./build/webserver -t 4 -l warn -p 8080                  # 只保留告警与错误
+./build/webserver -t 4 -l info -g logs -s 32 -p 8080    # 异步落盘，按 32MB 轮转
+./build/webserver -t 4 -l info -g logs -q -p 8080       # 静默：只写文件
+```
+
+## 三、验证
+
+```bash
+# 1. 日志格式（时间 线程id 级别 内容 文件:行号）
+./build/webserver -t 2 -p 8080
+# 20260926 20:15:03.123456 [INFO ] acceptor listening on port 8080 - Acceptor.cpp:33
+
+# 2. 级别过滤
+./build/webserver -l warn -p 8080     # 正常请求不再打印
+./build/webserver -l debug -p 8080    # 能看到 epoll add 这类 DEBUG
+
+# 3. 异步落盘与轮转
+./build/webserver -g logs -s 1 -p 8080 &
+ls -lh logs/                          # 出现 server.<时间>.<pid>.log
+wrk -t4 -c200 -d60s http://127.0.0.1:8080/index.html
+ls logs/ | wc -l                      # 超过 1MB 后文件数量增加
+
+# 4. 静默模式对比 QPS
+./build/webserver -l info -g logs -q -p 8080
+wrk -t4 -c200 -d60s --latency http://127.0.0.1:8080/index.html
+```
+
+## 四、这一版代码的关键点
+
+1. **前端/后端分离**：`Logger` 只格式化，输出目标由函数指针决定，因此控制台、异步文件、
+   测试用内存缓冲可以互换。
+2. **零分配格式化**：`FixedBuffer` 在栈上，整数用除法逐位写出，避免每条日志一次 `std::string`。
+3. **宏里先判级别**：`if (Logger::level() <= kInfo)` 保证低于阈值的日志连拼接都不发生。
+4. **异步双缓冲**：前端写满一块就交给后端，后端批量写文件并归还缓冲，避免频繁 write 与锁竞争。
+5. **按大小与日期轮转**：单文件超过 `-s` 指定大小立刻换文件，同时保证每天至少一个文件。
+6. **时间基准分开**：日志用 `CLOCK_REALTIME`（人能对上时间），定时器用 `steady_clock`（单调）。
+7. **清理调试打印**：删掉了 `TcpConnection::start()` 里的 3 行 `[start]` 与 `Epoller::add` 的
+   `add OK` 打印，改为 DEBUG 级日志。
+
+## 五、验收标准
+
+1. 四种级别过滤都生效，格式统一且带线程 id；
+2. `-g` 时日志写入文件，`-s 1` 能观察到轮转；
+3. `-q` 时控制台无输出但文件仍在写；
+4. 压测数据完整：warn/info/debug 与控制台开关四组对比；
+5. 多线程下日志不交错、不丢行；
+6. 能回答：为什么要前后端分离、异步日志丢日志的窗口有多大、宏里先判级别省掉了什么。
+
+## 六、提交
+
+```bash
+git checkout -b stage6-logging
+git add CMakeLists.txt include src
+git commit -m "feat: 阶段6 分级日志与异步落盘"
+git add docs/adr/0005-logging-design.md docs/stage-6-验收记录.md
+git commit -m "docs: 阶段6 决策记录与验收记录"
+git push -u origin stage6-logging
+```
+
+## 七、README 需要同步的改动
+
+阶段进度表：
+
+```
+| 6 | 日志系统 | 已完成 |
+```
+
+设计决策一节追加：
+
+```
+- [ADR 0005：日志系统的前后端分离与异步落盘](docs/adr/0005-logging-design.md)
+```
 

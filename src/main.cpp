@@ -1,7 +1,9 @@
-// 阶段 4：主从 Reactor + 线程池。
-// 主线程只做 Acceptor，读写事件由多个 IO 线程分担；可选的 worker 线程池负责耗时任务。
+// 阶段 5：在主从 Reactor 之上加入定时器。
+// 空闲连接超时、周期性统计都通过 EventLoop 的定时器接口实现。
 
+#include <atomic>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -29,15 +31,17 @@ struct ServerOptions {
     std::string wwwRoot{"www"};
     size_t ioThreads{4};      // 0 表示单线程（阶段 3 的行为，便于做对比压测）
     size_t workerThreads{0};  // >0 时把静态文件处理放到工作线程池
+    double idleTimeoutSeconds{0.0};  // >0 时启用空闲连接超时
 };
 
 void printUsage(const char* program) {
     std::cout << "usage: " << program << " [-p port] [-r wwwRoot] [-t ioThreads] "
-                 "[-w workerThreads] [-h]\n"
+                 "[-w workerThreads] [-i idleSeconds] [-h]\n"
               << "  -p port          监听端口，默认 8080\n"
               << "  -r wwwRoot       静态资源目录，默认 www\n"
               << "  -t ioThreads     IO 线程数，默认 4，0 表示单线程\n"
               << "  -w workerThreads 计算线程池大小，默认 0（关闭）\n"
+              << "  -i idleSeconds   空闲连接超时秒数，默认 0（不启用）\n"
               << "  -h               显示帮助\n";
 }
 
@@ -67,6 +71,10 @@ ParseResult parseArgs(int argc, char* argv[], ServerOptions* options) {
         if (arg == "-w" && hasValue) {
             options->workerThreads =
                 static_cast<size_t>(std::strtoul(argv[++i], nullptr, 10));
+            continue;
+        }
+        if (arg == "-i" && hasValue) {
+            options->idleTimeoutSeconds = std::strtod(argv[++i], nullptr);
             continue;
         }
         std::cerr << "unknown or incomplete argument: " << arg << "\n";
@@ -141,26 +149,46 @@ int main(int argc, char* argv[]) {
             workerPool.start();
         }
 
-        myself::Router router(options.wwwRoot);
-        router.registerHandler("/api/status", [&ioPool, &workerPool](const myself::HttpRequest&) {
-            myself::HttpResponse response;
-            response.setStatus(200, "OK");
-            response.setContentType("application/json; charset=utf-8");
-            response.setBody(std::string("{\"name\":\"MyselfWebServer\",\"version\":\"") +
-                             myself::version() + "\",\"ioThreads\":" +
-                             std::to_string(ioPool.threadCount()) + ",\"workerThreads\":" +
-                             std::to_string(workerPool.threadCount()) + ",\"status\":\"ok\"}");
-            return response;
+        // 跨线程读取的统计数据用原子变量：定时器任务在 main 线程更新，
+        // /api/status 可能在任何 IO 线程里读取。
+        std::atomic<size_t> timerCount{0};
+        ConnectionRegistry registry;
+
+        // 周期性统计：演示 runEvery 的用法，同时刷新定时器数量
+        baseLoop.runEvery(10.0, [&baseLoop, &registry, &timerCount] {
+            timerCount.store(baseLoop.timerCount());
+            std::cout << "[stats] online=" << registry.size()
+                      << ", timers=" << timerCount.load() << ", up="
+                      << (myself::elapsedMs(myself::now()) / 1000) << "s\n";
         });
 
-        ConnectionRegistry registry;
+        myself::Router router(options.wwwRoot);
+        router.registerHandler(
+            "/api/status",
+            [&ioPool, &workerPool, &timerCount,
+             idleSeconds = options.idleTimeoutSeconds](const myself::HttpRequest&) {
+                myself::HttpResponse response;
+                response.setStatus(200, "OK");
+                response.setContentType("application/json; charset=utf-8");
+                response.setBody(
+                    std::string("{\"name\":\"MyselfWebServer\",\"version\":\"") +
+                    myself::version() + "\",\"ioThreads\":" +
+                    std::to_string(ioPool.threadCount()) + ",\"workerThreads\":" +
+                    std::to_string(workerPool.threadCount()) +
+                    ",\"idleTimeoutSeconds\":" + std::to_string(idleSeconds) +
+                    ",\"timers\":" + std::to_string(timerCount.load()) +
+                    ",\"status\":\"ok\"}");
+                return response;
+            });
+
         myself::Acceptor acceptor(&baseLoop, "0.0.0.0", options.port);
 
         acceptor.setNewConnectionCallback([&](int connfd, std::string ip, uint16_t peerPort) {
             myself::EventLoop* ioLoop = ioPool.nextLoop();
 
             // 连接必须在它所属的 IO 线程里创建并注册事件，否则就是跨线程操作 epoll
-            ioLoop->runInLoop([&router, &workerPool, &registry, connfd, ip, peerPort, ioLoop] {
+            ioLoop->runInLoop([&router, &workerPool, &registry, connfd, ip, peerPort, ioLoop,
+                               idleSeconds = options.idleTimeoutSeconds] {
                 auto conn = std::make_shared<myself::TcpConnection>(ioLoop, connfd, ip, peerPort);
                 const int fd = conn->fd();
                 auto parser = std::make_shared<myself::HttpParser>();
@@ -227,6 +255,9 @@ int main(int argc, char* argv[]) {
 
                 registry.add(fd, conn);
                 conn->start();
+                if (idleSeconds > 0) {
+                    conn->setIdleTimeout(idleSeconds);  // 空闲超时在所属 IO 线程内启用
+                }
 
                 std::cout << "[accept] fd=" << fd << " peer=" << ip << ":" << peerPort
                           << " -> " << ioLoop->name() << ", online=" << registry.size()
@@ -237,7 +268,8 @@ int main(int argc, char* argv[]) {
         acceptor.listen();
         std::cout << myself::buildInfo() << " http server started, io threads="
                   << options.ioThreads << ", worker threads=" << options.workerThreads
-                  << ", www root=" << options.wwwRoot << "\n";
+                  << ", idle timeout=" << options.idleTimeoutSeconds
+                  << "s, www root=" << options.wwwRoot << "\n";
 
         baseLoop.loop();
 

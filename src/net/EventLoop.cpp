@@ -10,11 +10,14 @@
 
 #include "myself/net/Channel.h"
 #include "myself/net/Epoller.h"
+#include "myself/timer/TimerQueue.h"
 
 namespace myself {
 
 EventLoop::EventLoop()
     : epoller_(std::make_unique<Epoller>()), threadId_(std::this_thread::get_id()) {
+    timerQueue_ = std::make_unique<TimerQueue>(this);
+
     // eventfd 作为唤醒通道：其他线程投递任务时写 8 字节，让 epoll_wait 立即返回
     wakeupFd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (wakeupFd_ < 0) {
@@ -42,10 +45,13 @@ void EventLoop::loop(int timeoutMs) {
     quit_.store(false);
 
     while (!quit_.load()) {
-        const int count = epoller_->wait(timeoutMs);
+        // 传入 -1 时按最近到期的定时器自动计算等待时间
+        const int waitMs = (timeoutMs >= 0) ? timeoutMs : timerQueue_->nextTimeoutMs();
+        const int count = epoller_->wait(waitMs);
         if (count > 0) {
             dispatch(epoller_->events(), count);
         }
+        timerQueue_->handleExpiredTimers(now());  // 处理到期定时器
         doPendingFunctors();  // 每轮都处理跨线程投递的任务
     }
 }
@@ -116,6 +122,29 @@ void EventLoop::doPendingFunctors() {
 size_t EventLoop::pendingTaskCount() {
     std::lock_guard<std::mutex> lock(mutex_);
     return pendingFunctors_.size();
+}
+
+TimerId EventLoop::runAt(Timestamp when, TimerCallback callback) {
+    return timerQueue_->addTimer(std::move(callback), when, 0.0);
+}
+
+TimerId EventLoop::runAfter(double delaySeconds, TimerCallback callback) {
+    return timerQueue_->addTimer(std::move(callback), now() + secondsToDuration(delaySeconds),
+                                 0.0);
+}
+
+TimerId EventLoop::runEvery(double intervalSeconds, TimerCallback callback) {
+    return timerQueue_->addTimer(std::move(callback),
+                                 now() + secondsToDuration(intervalSeconds),
+                                 intervalSeconds);
+}
+
+void EventLoop::cancelTimer(TimerId timerId) {
+    timerQueue_->cancel(timerId);
+}
+
+size_t EventLoop::timerCount() const {
+    return timerQueue_->size();
 }
 
 void EventLoop::dispatch(const std::vector<epoll_event>& events, int count) {

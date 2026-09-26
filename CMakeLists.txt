@@ -25,6 +25,9 @@ add_executable(webserver
 
     src/thread/ThreadPool.cpp
 
+    src/timer/Timer.cpp
+    src/timer/TimerQueue.cpp
+
     src/http/HttpParser.cpp
     src/http/HttpRequest.cpp
     src/http/HttpResponse.cpp

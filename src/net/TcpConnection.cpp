@@ -80,15 +80,50 @@ void TcpConnection::forceClose() {
     handleClose();
 }
 
+void TcpConnection::setIdleTimeout(double seconds) {
+    idleTimeoutSeconds_ = seconds;
+    if (seconds > 0 && !closed_) {
+        refreshIdleTimer();
+    }
+}
+
+void TcpConnection::refreshIdleTimer() {
+    if (idleTimeoutSeconds_ <= 0 || closed_) {
+        return;
+    }
+    if (idleTimer_.valid()) {
+        loop_->cancelTimer(idleTimer_);
+        idleTimer_ = TimerId();
+    }
+
+    // 只持有弱引用：连接先关闭时回调什么也不做
+    std::weak_ptr<TcpConnection> weak = shared_from_this();
+    idleTimer_ = loop_->runAfter(idleTimeoutSeconds_, [weak] {
+        if (auto conn = weak.lock()) {
+            conn->handleIdleTimeout();
+        }
+    });
+}
+
+void TcpConnection::handleIdleTimeout() {
+    if (closed_) {
+        return;
+    }
+    std::cout << "[timeout] fd=" << socket_.fd() << " peer=" << peerIp_ << ":" << peerPort_
+              << " idle over " << idleTimeoutSeconds_ << "s, closing\n";
+    handleClose();
+}
+
 void TcpConnection::handleRead() {
-    std::cerr << "[handleRead] fd=" << socket_.fd() << " called\n";   // ← 加这行
     int savedErrno = 0;
     bool peerClosed = false;
+    bool activity = false;
 
     // ET 模式：一次事件必须循环读到 EAGAIN
     for (;;) {
         const ssize_t n = input_.readFd(socket_.fd(), &savedErrno);
         if (n > 0) {
+            activity = true;
             if (messageCallback_) {
                 messageCallback_(shared_from_this(), &input_);
             }
@@ -107,6 +142,10 @@ void TcpConnection::handleRead() {
         std::cerr << "[conn] read failed: " << std::strerror(savedErrno) << "\n";
         handleError();
         return;
+    }
+
+    if (activity) {
+        refreshIdleTimer();  // 有数据往来就刷新空闲计时
     }
 
     if (peerClosed) {
@@ -140,6 +179,11 @@ void TcpConnection::handleClose() {
     }
     closed_ = true;
 
+    if (idleTimer_.valid()) {
+        loop_->cancelTimer(idleTimer_);  // 先取消空闲定时器，避免回调访问已关闭连接
+        idleTimer_ = TimerId();
+    }
+
     channel_.disableAll();  // 不再关心任何事件
     channel_.remove();      // 从 epoll 与事件循环注销
     socket_.close();
@@ -161,4 +205,3 @@ void TcpConnection::handleError() {
 }
 
 }  // namespace myself
-
