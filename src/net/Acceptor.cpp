@@ -7,8 +7,8 @@
 
 #include <cerrno>
 #include <cstring>
-#include <iostream>
 
+#include "myself/log/Logger.h"
 #include "myself/net/EventLoop.h"
 
 namespace myself {
@@ -27,7 +27,7 @@ Acceptor::~Acceptor() {
 
 void Acceptor::listen() {
     channel_.enableReading();
-    std::cout << "[acceptor] listening on port " << port_ << "\n";
+    LOG_INFO << "acceptor listening on port " << port_;
 }
 
 void Acceptor::handleRead() {
@@ -45,7 +45,7 @@ void Acceptor::handleRead() {
             if (errno == EINTR) {
                 continue;
             }
-            std::cerr << "[acceptor] accept failed: " << std::strerror(errno) << "\n";
+            LOG_ERROR << "accept failed: " << std::strerror(errno);
             break;
         }
 
@@ -60,4 +60,3 @@ void Acceptor::handleRead() {
 }
 
 }  // namespace myself
-

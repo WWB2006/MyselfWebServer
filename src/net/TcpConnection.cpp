@@ -1,3 +1,4 @@
+
 #include "myself/net/TcpConnection.h"
 
 #include <sys/socket.h>
@@ -5,9 +6,9 @@
 
 #include <cerrno>
 #include <cstring>
-#include <iostream>
 #include <utility>
 
+#include "myself/log/Logger.h"
 #include "myself/net/EventLoop.h"
 
 namespace myself {
@@ -32,12 +33,9 @@ TcpConnection::~TcpConnection() {
 }
 
 void TcpConnection::start() {
-    std::cerr << "[start] fd=" << channel_.fd() << " events=" << channel_.events() << "\n";
     channel_.tie(shared_from_this());
     channel_.enableReading();
-    std::cerr << "[start] after enableReading events=" << channel_.events() << "\n";
     loop_->updateChannel(&channel_);
-    std::cerr << "[start] updateChannel done fd=" << channel_.fd() << "\n";
 }
 
 void TcpConnection::send(const std::string& data) {
@@ -58,7 +56,7 @@ void TcpConnection::sendInLoop(const std::string& data) {
             cursor += n;
             remaining -= static_cast<size_t>(n);
         } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            std::cerr << "[conn] write failed: " << std::strerror(errno) << "\n";
+            LOG_ERROR << "conn write failed: " << std::strerror(errno);
             handleClose();
             return;
         }
@@ -109,8 +107,8 @@ void TcpConnection::handleIdleTimeout() {
     if (closed_) {
         return;
     }
-    std::cout << "[timeout] fd=" << socket_.fd() << " peer=" << peerIp_ << ":" << peerPort_
-              << " idle over " << idleTimeoutSeconds_ << "s, closing\n";
+    LOG_WARN << "timeout fd=" << socket_.fd() << " peer=" << peerIp_ << ":" << peerPort_
+             << " idle over " << idleTimeoutSeconds_ << "s, closing";
     handleClose();
 }
 
@@ -139,7 +137,7 @@ void TcpConnection::handleRead() {
         if (savedErrno == EINTR) {
             continue;
         }
-        std::cerr << "[conn] read failed: " << std::strerror(savedErrno) << "\n";
+        LOG_ERROR << "conn read failed: " << std::strerror(savedErrno);
         handleError();
         return;
     }
@@ -168,7 +166,7 @@ void TcpConnection::handleWrite() {
         return;
     }
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-        std::cerr << "[conn] write failed: " << std::strerror(errno) << "\n";
+        LOG_ERROR << "conn write failed: " << std::strerror(errno);
         handleClose();
     }
 }
@@ -199,8 +197,8 @@ void TcpConnection::handleError() {
     if (::getsockopt(socket_.fd(), SOL_SOCKET, SO_ERROR, &error, &len) < 0) {
         error = errno;
     }
-    std::cerr << "[conn] socket error on fd=" << socket_.fd() << ": "
-              << std::strerror(error) << "\n";
+    LOG_ERROR << "conn socket error on fd=" << socket_.fd() << ": "
+              << std::strerror(error);
     handleClose();
 }
 

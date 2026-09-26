@@ -1,12 +1,13 @@
+
 #include "myself/net/Epoller.h"
 
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
-#include <iostream>
 #include <stdexcept>
 
+#include "myself/log/Logger.h"
 #include "myself/net/Channel.h"
 
 namespace myself {
@@ -30,12 +31,10 @@ bool Epoller::add(Channel* channel) {
     event.data.fd = channel->fd();
     event.events = channel->events();
     if (::epoll_ctl(epollFd_, EPOLL_CTL_ADD, channel->fd(), &event) < 0) {
-        std::cerr << "[epoller] add fd=" << channel->fd()
-                  << " failed: " << std::strerror(errno) << "\n";
+        LOG_ERROR << "epoller add fd=" << channel->fd()
+                  << " failed: " << std::strerror(errno);
         return false;
     }
-    std::cerr << "[epoller] add OK fd=" << channel->fd()
-              << " events=" << event.events << "\n";   // ← 加这行
     return true;
 }
 
@@ -44,8 +43,8 @@ bool Epoller::modify(Channel* channel) {
     event.data.fd = channel->fd();
     event.events = channel->events();
     if (::epoll_ctl(epollFd_, EPOLL_CTL_MOD, channel->fd(), &event) < 0) {
-        std::cerr << "[epoller] modify fd=" << channel->fd()
-                  << " failed: " << std::strerror(errno) << "\n";
+        LOG_ERROR << "epoller modify fd=" << channel->fd()
+                  << " failed: " << std::strerror(errno);
         return false;
     }
     return true;
@@ -53,8 +52,8 @@ bool Epoller::modify(Channel* channel) {
 
 bool Epoller::remove(Channel* channel) {
     if (::epoll_ctl(epollFd_, EPOLL_CTL_DEL, channel->fd(), nullptr) < 0) {
-        std::cerr << "[epoller] remove fd=" << channel->fd()
-                  << " failed: " << std::strerror(errno) << "\n";
+        LOG_ERROR << "epoller remove fd=" << channel->fd()
+                  << " failed: " << std::strerror(errno);
         return false;
     }
     return true;
@@ -64,10 +63,9 @@ int Epoller::wait(int timeoutMs) {
     const int count = ::epoll_wait(epollFd_, events_.data(),
                                    static_cast<int>(events_.size()), timeoutMs);
     if (count < 0 && errno != EINTR) {
-        std::cerr << "[epoller] wait failed: " << std::strerror(errno) << "\n";
+        LOG_ERROR << "epoller wait failed: " << std::strerror(errno);
     }
     return count;
 }
 
 }  // namespace myself
-

@@ -28,6 +28,11 @@ add_executable(webserver
     src/timer/Timer.cpp
     src/timer/TimerQueue.cpp
 
+    src/log/LogStream.cpp
+    src/log/Logger.cpp
+    src/log/LogFile.cpp
+    src/log/AsyncLogging.cpp
+
     src/http/HttpParser.cpp
     src/http/HttpRequest.cpp
     src/http/HttpResponse.cpp

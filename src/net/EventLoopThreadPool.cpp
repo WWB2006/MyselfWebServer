@@ -1,8 +1,8 @@
 #include "myself/net/EventLoopThreadPool.h"
 
-#include <iostream>
 #include <utility>
 
+#include "myself/log/Logger.h"
 #include "myself/net/EventLoop.h"
 
 namespace myself {
@@ -43,8 +43,7 @@ void EventLoopThreadPool::start(const EventLoopThread::ThreadInitCallback& callb
         callback(baseLoop_);  // 单线程模式下也用 baseLoop 跑初始化
     }
 
-    std::cout << "[pool] " << name_ << " started with " << loops_.size()
-              << " io thread(s)\n";
+    LOG_INFO << "io pool " << name_ << " started with " << loops_.size() << " thread(s)";
 }
 
 EventLoop* EventLoopThreadPool::nextLoop() {

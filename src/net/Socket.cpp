@@ -1,5 +1,5 @@
 #include "myself/net/Socket.h"
-#include <iostream>
+
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -22,7 +22,6 @@ std::runtime_error sysError(const std::string& what) {
 }  // namespace
 
 Socket::~Socket() {
-    std::cerr << "[~Socket] fd=" << fd_ << "\n";   // ← 加这行
     close();
 }
 
@@ -74,7 +73,6 @@ Socket Socket::listenOn(const std::string& ip, int port, int backlog) {
         throw sysError("socket");
     }
 
-    // 复用地址，避免重启时因为 TIME_WAIT 报 Address already in use
     sock.setReuseAddr(true);
 
     sockaddr_in addr{};
@@ -92,9 +90,8 @@ Socket Socket::listenOn(const std::string& ip, int port, int backlog) {
     if (::listen(sock.fd(), backlog) < 0) {
         throw sysError("listen");
     }
-    sock.setNonBlocking(true);   // ← 加这行
+    sock.setNonBlocking(true);
     return sock;
 }
 
 }  // namespace myself
-

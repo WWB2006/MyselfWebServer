@@ -4,6 +4,7 @@
 #include <atomic>
 #include <csignal>
 #include <cstddef>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -17,6 +18,9 @@
 #include "myself/http/HttpRequest.h"
 #include "myself/http/HttpResponse.h"
 #include "myself/http/Router.h"
+#include "myself/log/AsyncLogging.h"
+#include "myself/log/LogFile.h"
+#include "myself/log/Logger.h"
 #include "myself/net/Acceptor.h"
 #include "myself/net/EventLoop.h"
 #include "myself/net/EventLoopThreadPool.h"
@@ -26,22 +30,57 @@
 
 namespace {
 
+/// 日志输出目标：可选异步文件 + 控制台。用全局指针是因为 Logger 的输出函数
+/// 是普通函数指针，不能捕获局部变量。
+myself::AsyncLogging* g_asyncLog = nullptr;
+bool g_consoleOutput = true;
+std::mutex g_consoleMutex;
+
+void logOutput(const char* data, size_t len) {
+    if (g_asyncLog != nullptr) {
+        g_asyncLog->append(data, len);
+    }
+    if (g_consoleOutput) {
+        std::lock_guard<std::mutex> lock(g_consoleMutex);
+        std::fwrite(data, 1, len, stdout);
+    }
+}
+
+void logFlush() {
+    if (g_asyncLog != nullptr) {
+        g_asyncLog->flush();
+    }
+    if (g_consoleOutput) {
+        std::lock_guard<std::mutex> lock(g_consoleMutex);
+        std::fflush(stdout);
+    }
+}
+
 struct ServerOptions {
     int port{8080};
     std::string wwwRoot{"www"};
     size_t ioThreads{4};      // 0 表示单线程（阶段 3 的行为，便于做对比压测）
     size_t workerThreads{0};  // >0 时把静态文件处理放到工作线程池
     double idleTimeoutSeconds{0.0};  // >0 时启用空闲连接超时
+    std::string logLevel{"info"};    // trace/debug/info/warn/error
+    std::string logDir;              // 为空表示只输出到控制台
+    size_t logRollSizeMb{32};        // 单个日志文件大小上限
+    bool quiet{false};               // 只写文件，不输出到控制台
 };
 
 void printUsage(const char* program) {
     std::cout << "usage: " << program << " [-p port] [-r wwwRoot] [-t ioThreads] "
-                 "[-w workerThreads] [-i idleSeconds] [-h]\n"
+                 "[-w workerThreads] [-i idleSeconds]\n"
+                 "       [-l logLevel] [-g logDir] [-s rollSizeMb] [-q] [-h]\n"
               << "  -p port          监听端口，默认 8080\n"
               << "  -r wwwRoot       静态资源目录，默认 www\n"
               << "  -t ioThreads     IO 线程数，默认 4，0 表示单线程\n"
               << "  -w workerThreads 计算线程池大小，默认 0（关闭）\n"
               << "  -i idleSeconds   空闲连接超时秒数，默认 0（不启用）\n"
+              << "  -l logLevel      日志级别 trace/debug/info/warn/error，默认 info\n"
+              << "  -g logDir        日志目录（启用异步落盘），默认只输出控制台\n"
+              << "  -s rollSizeMb    单个日志文件大小上限，默认 32MB\n"
+              << "  -q               静默模式：只写文件或丢弃，不输出到控制台\n"
               << "  -h               显示帮助\n";
 }
 
@@ -75,6 +114,23 @@ ParseResult parseArgs(int argc, char* argv[], ServerOptions* options) {
         }
         if (arg == "-i" && hasValue) {
             options->idleTimeoutSeconds = std::strtod(argv[++i], nullptr);
+            continue;
+        }
+        if (arg == "-l" && hasValue) {
+            options->logLevel = argv[++i];
+            continue;
+        }
+        if (arg == "-g" && hasValue) {
+            options->logDir = argv[++i];
+            continue;
+        }
+        if (arg == "-s" && hasValue) {
+            options->logRollSizeMb =
+                static_cast<size_t>(std::strtoul(argv[++i], nullptr, 10));
+            continue;
+        }
+        if (arg == "-q") {
+            options->quiet = true;
             continue;
         }
         std::cerr << "unknown or incomplete argument: " << arg << "\n";
@@ -136,6 +192,21 @@ int main(int argc, char* argv[]) {
 
     std::signal(SIGPIPE, SIG_IGN);
 
+    // 日志系统初始化：级别过滤 + 可选的异步文件输出
+    myself::Logger::setLevel(myself::logLevelFromString(options.logLevel));
+    g_consoleOutput = !options.quiet;
+    std::unique_ptr<myself::AsyncLogging> asyncLog;
+    if (!options.logDir.empty()) {
+        const std::string baseName = options.logDir + "/server";
+        asyncLog = std::make_unique<myself::AsyncLogging>(
+            baseName, options.logRollSizeMb * 1024 * 1024);
+        asyncLog->start();
+        g_asyncLog = asyncLog.get();
+        LOG_INFO << "async logging enabled, dir=" << options.logDir
+                 << ", roll=" << options.logRollSizeMb << "MB";
+    }
+    myself::Logger::setOutput(logOutput, logFlush);
+
     try {
         myself::EventLoop baseLoop;   // 主线程：只负责 accept
         baseLoop.setName("main");
@@ -157,9 +228,9 @@ int main(int argc, char* argv[]) {
         // 周期性统计：演示 runEvery 的用法，同时刷新定时器数量
         baseLoop.runEvery(10.0, [&baseLoop, &registry, &timerCount] {
             timerCount.store(baseLoop.timerCount());
-            std::cout << "[stats] online=" << registry.size()
-                      << ", timers=" << timerCount.load() << ", up="
-                      << (myself::elapsedMs(myself::now()) / 1000) << "s\n";
+            LOG_INFO << "stats online=" << registry.size()
+                     << " timers=" << timerCount.load()
+                     << " up=" << (myself::elapsedMs(myself::now()) / 1000) << "s";
         });
 
         myself::Router router(options.wwwRoot);
@@ -220,8 +291,8 @@ int main(int argc, char* argv[]) {
                                                myself::HttpResponse response) {
                                 response.setCloseConnection(!keepAlive);
                                 c->send(response.serialize(!headOnly));
-                                std::cout << "[http] -> " << response.statusCode()
-                                          << " on " << ioLoop->name() << "\n";
+                                LOG_INFO << "http status=" << response.statusCode()
+                                         << " loop=" << ioLoop->name();
                                 if (!keepAlive) {
                                     c->shutdownWrite();
                                 }
@@ -248,8 +319,8 @@ int main(int argc, char* argv[]) {
 
                 conn->setCloseCallback(
                     [&registry, fd](const std::shared_ptr<myself::TcpConnection>& c) {
-                        std::cout << "[close] fd=" << fd << " peer=" << c->peerIp() << ":"
-                                  << c->peerPort() << "\n";
+                        LOG_INFO << "close fd=" << fd << " peer=" << c->peerIp() << ":"
+                                 << c->peerPort();
                         registry.remove(fd);
                     });
 
@@ -259,17 +330,16 @@ int main(int argc, char* argv[]) {
                     conn->setIdleTimeout(idleSeconds);  // 空闲超时在所属 IO 线程内启用
                 }
 
-                std::cout << "[accept] fd=" << fd << " peer=" << ip << ":" << peerPort
-                          << " -> " << ioLoop->name() << ", online=" << registry.size()
-                          << "\n";
+                LOG_INFO << "accept fd=" << fd << " peer=" << ip << ":" << peerPort
+                         << " loop=" << ioLoop->name() << " online=" << registry.size();
             });
         });
 
         acceptor.listen();
-        std::cout << myself::buildInfo() << " http server started, io threads="
-                  << options.ioThreads << ", worker threads=" << options.workerThreads
-                  << ", idle timeout=" << options.idleTimeoutSeconds
-                  << "s, www root=" << options.wwwRoot << "\n";
+        LOG_INFO << myself::buildInfo() << " http server started, io threads="
+                 << options.ioThreads << " worker threads=" << options.workerThreads
+                 << " idle timeout=" << options.idleTimeoutSeconds
+                 << "s log level=" << options.logLevel << " www root=" << options.wwwRoot;
 
         baseLoop.loop();
 
@@ -277,8 +347,15 @@ int main(int argc, char* argv[]) {
         registry.closeAll();
         workerPool.stop();
     } catch (const std::exception& ex) {
-        std::cerr << "fatal: " << ex.what() << "\n";
+        LOG_ERROR << "fatal: " << ex.what();
         return EXIT_FAILURE;
+    }
+
+    LOG_INFO << "server stopped";
+    myself::Logger::flush();
+    if (asyncLog != nullptr) {
+        asyncLog->stop();
+        g_asyncLog = nullptr;
     }
 
     return EXIT_SUCCESS;

@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "myself/log/Logger.h"
 #include "myself/net/Channel.h"
 #include "myself/net/Epoller.h"
 #include "myself/timer/TimerQueue.h"
@@ -86,8 +87,8 @@ void EventLoop::assertInLoopThread() const {
     if (isInLoopThread()) {
         return;
     }
-    std::cerr << "[loop:" << (name_.empty() ? "unnamed" : name_)
-              << "] fatal: operation must run in its own thread\n";
+    LOG_ERROR << "loop " << (name_.empty() ? "unnamed" : name_)
+              << " fatal: operation must run in its own thread";
     std::abort();
 }
 

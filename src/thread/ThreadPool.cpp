@@ -1,8 +1,9 @@
 #include "myself/thread/ThreadPool.h"
 
-#include <iostream>
 #include <stdexcept>
 #include <utility>
+
+#include "myself/log/Logger.h"
 
 namespace myself {
 
@@ -25,8 +26,7 @@ void ThreadPool::start() {
         threads_.emplace_back([this] { workerLoop(); });
     }
 
-    std::cout << "[pool] " << name_ << " worker pool started with " << threadCount_
-              << " thread(s)\n";
+    LOG_INFO << "worker pool " << name_ << " started with " << threadCount_ << " thread(s)";
 }
 
 void ThreadPool::stop() {
@@ -83,9 +83,9 @@ void ThreadPool::workerLoop() {
             task();
         } catch (const std::exception& ex) {
             // 单个任务异常不能让工作线程退出
-            std::cerr << "[pool:" << name_ << "] task failed: " << ex.what() << "\n";
+            LOG_ERROR << "worker pool " << name_ << " task failed: " << ex.what();
         } catch (...) {
-            std::cerr << "[pool:" << name_ << "] task failed: unknown exception\n";
+            LOG_ERROR << "worker pool " << name_ << " task failed: unknown exception";
         }
     }
 }
