@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "myself/log/LogStream.h"
@@ -38,6 +39,9 @@ public:
     /// 设置输出目标；默认输出到 stdout。
     static void setOutput(OutputFunc output, FlushFunc flush);
     static void flush();
+
+    /// 累计输出的日志行数（供 /metrics 使用）；跨线程读取安全。
+    static uint64_t lineCount();
 
 private:
     static const char* baseName(const char* path);

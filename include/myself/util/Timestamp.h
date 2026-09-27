@@ -34,6 +34,11 @@ inline int64_t elapsedMs(Timestamp when) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(when - kStart).count();
 }
 
+/// 两个时间点之间的毫秒数（带小数），用于测量请求处理延迟。
+inline double msBetween(Timestamp begin, Timestamp end) {
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
 inline std::string toString(Timestamp when) {
     return std::to_string(elapsedMs(when)) + "ms";
 }

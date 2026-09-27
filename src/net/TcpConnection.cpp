@@ -10,6 +10,7 @@
 
 #include "myself/log/Logger.h"
 #include "myself/net/EventLoop.h"
+#include "myself/util/Metrics.h"
 
 namespace myself {
 
@@ -53,10 +54,12 @@ void TcpConnection::sendInLoop(const std::string& data) {
     if (!channel_.isWriting() && output_.readableBytes() == 0) {
         const ssize_t n = ::write(socket_.fd(), cursor, remaining);
         if (n >= 0) {
+            myself::metrics::bytesWritten(static_cast<size_t>(n));
             cursor += n;
             remaining -= static_cast<size_t>(n);
         } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             LOG_ERROR << "conn write failed: " << std::strerror(errno);
+            myself::metrics::error();
             handleClose();
             return;
         }
@@ -122,6 +125,7 @@ void TcpConnection::handleRead() {
         const ssize_t n = input_.readFd(socket_.fd(), &savedErrno);
         if (n > 0) {
             activity = true;
+            myself::metrics::bytesRead(static_cast<size_t>(n));
             if (messageCallback_) {
                 messageCallback_(shared_from_this(), &input_);
             }
@@ -138,6 +142,7 @@ void TcpConnection::handleRead() {
             continue;
         }
         LOG_ERROR << "conn read failed: " << std::strerror(savedErrno);
+        myself::metrics::error();
         handleError();
         return;
     }
@@ -159,6 +164,7 @@ void TcpConnection::handleWrite() {
 
     const ssize_t n = ::write(socket_.fd(), output_.peek(), output_.readableBytes());
     if (n > 0) {
+        myself::metrics::bytesWritten(static_cast<size_t>(n));
         output_.retrieve(static_cast<size_t>(n));
         if (output_.readableBytes() == 0) {
             channel_.disableWriting();
@@ -167,6 +173,7 @@ void TcpConnection::handleWrite() {
     }
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         LOG_ERROR << "conn write failed: " << std::strerror(errno);
+        myself::metrics::error();
         handleClose();
     }
 }
@@ -199,6 +206,7 @@ void TcpConnection::handleError() {
     }
     LOG_ERROR << "conn socket error on fd=" << socket_.fd() << ": "
               << std::strerror(error);
+    myself::metrics::error();
     handleClose();
 }
 

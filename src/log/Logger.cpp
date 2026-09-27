@@ -16,6 +16,7 @@ namespace {
 
 std::mutex g_outputMutex;
 std::atomic<LogLevel> g_level{kInfo};
+std::atomic<uint64_t> g_lineCount{0};
 
 void defaultOutput(const char* data, size_t len) {
     std::lock_guard<std::mutex> lock(g_outputMutex);
@@ -99,6 +100,7 @@ Logger::~Logger() {
     stream_ << " - " << baseName(file_) << ":" << line_ << "\n";
     const LogStream::Buffer& buffer = stream_.buffer();
     g_output(buffer.data(), buffer.length());
+    g_lineCount.fetch_add(1);
 
     if (level_ == kFatal) {
         g_flush();
@@ -128,5 +130,8 @@ void Logger::flush() {
     g_flush();
 }
 
-}  // namespace myself
+uint64_t Logger::lineCount() {
+    return g_lineCount.load();
+}
 
+}  // namespace myself

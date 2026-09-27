@@ -840,3 +840,207 @@ git push -u origin stage6-logging
 - [ADR 0005：日志系统的前后端分离与异步落盘](docs/adr/0005-logging-design.md)
 ```
 
+# 阶段 7：运行指标与 /metrics 接口 —— 放置说明
+
+## 一、文件放置位置
+
+| 本目录文件 | 仓库中的位置 | 说明 |
+| --- | --- | --- |
+| include/myself/util/Metrics.h、src/util/Metrics.cpp | 新增 | 原子计数器 + 固定桶直方图 + Prometheus 文本渲染 |
+| include/myself/util/Timestamp.h | 同路径覆盖 | 新增 `msBetween()`，用于测量请求延迟 |
+| include/myself/log/Logger.h、src/log/Logger.cpp | 同路径覆盖 | 新增日志行计数 `Logger::lineCount()` |
+| src/net/TcpConnection.cpp | 同路径覆盖 | 上报读写字节数与 socket 错误 |
+| src/main.cpp | 同路径覆盖 | 安装指标、上报连接与请求、新增 `/metrics`、扩展 `/api/status` |
+| CMakeLists.txt | 同路径覆盖 | 加入 `src/util/Metrics.cpp` |
+| docs/adr/0006-metrics-design.md | docs/adr/ | 决策记录 |
+| docs/stage-7-验收记录.md | docs/ | 一致性核对与开销测量 |
+| docs/adr/0005-logging-design.md | docs/adr/ | **补交**：你仓库里缺的阶段 6 ADR，单独拷进去即可（不包含在补丁里） |
+
+## 二、构建与运行
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j"$(nproc)"
+./build/webserver -t 4 -l info -g logs -p 8080
+```
+
+## 三、验证
+
+```bash
+# 1. Prometheus 文本格式
+curl -s http://127.0.0.1:8080/metrics | head -25
+curl -sI http://127.0.0.1:8080/metrics | grep -i content-type
+
+# 2. JSON 摘要
+curl -s http://127.0.0.1:8080/api/status
+
+# 3. 计数器与压测结果核对
+curl -s http://127.0.0.1:8080/metrics | grep myself_requests_total
+wrk -t4 -c200 -d60s --latency http://<虚拟机IP>:8080/index.html
+curl -s http://127.0.0.1:8080/metrics | grep -E "myself_requests_total|latency_ms_count|latency_ms_quantile"
+
+# 4. 状态码分类：连续请求不存在的路径
+for i in $(seq 1 10); do curl -s -o /dev/null http://127.0.0.1:8080/not-exist; done
+curl -s http://127.0.0.1:8080/metrics | grep 'class="4xx"'
+
+# 5. 连接数是否回落
+curl -s http://127.0.0.1:8080/api/status | grep -o '"connections":{[^}]*}'
+```
+
+## 四、这一版代码的关键点
+
+1. **固定桶直方图**：12 个毫秒上界加一档 `+Inf`，内存恒定；分位由桶内插值估算，
+   精确值交给 Prometheus 的 `histogram_quantile()`。
+2. **全原子更新**：任意 IO 线程与 worker 线程都能上报，快照在调用线程内拼装，没有全局锁。
+3. **全局注册表加便捷函数**：`Metrics::install()` 之后 net 层直接调用 `metrics::error()` 这类函数；
+   未安装时是空操作，方便单元测试。
+4. **依赖方向保持干净**：`util` 不依赖 `log`，日志行数由 `main` 作为参数传给渲染函数。
+5. **延迟口径**：从解析出完整请求到响应写入完成，包含 worker 池排队与计算时间，接近用户感知的延迟。
+6. **命名规范**：`myself_` 前缀、单位后缀（`_ms`、`_seconds`）、`_total` 计数器，符合 Prometheus 习惯。
+
+## 五、验收标准
+
+1. `/metrics` 输出可被 Prometheus 解析（有 HELP/TYPE，值类型正确）；
+2. `/api/status` 含连接、请求、错误、字节、延迟分位、日志行数、运行时长；
+3. 压测后 `myself_requests_total` 与 wrk 报告的成功请求数接近，差值能解释；
+4. 404 请求计入 `4xx`，`HEAD` 计入对应方法分类；
+5. 压测结束后 `connections.current` 回落到 0，`max` 保留峰值；
+6. 开启指标带来的 QPS 下降在 5% 以内（若超出，用火焰图定位）。
+
+## 六、提交
+
+```bash
+git checkout -b stage7-metrics
+git add CMakeLists.txt include src
+git commit -m "feat: 阶段7 运行指标与 /metrics 接口"
+git add docs
+git commit -m "docs: 阶段7 决策记录与验收记录（含补交的 ADR 0005）"
+git push -u origin stage7-metrics
+```
+
+## 七、README 需要同步的改动
+
+阶段进度表：
+
+```
+| 7 | 运行指标与 /metrics 接口 | 已完成 |
+```
+
+设计决策一节追加：
+
+```
+- [ADR 0005：日志系统的前后端分离与异步落盘](docs/adr/0005-logging-design.md)
+- [ADR 0006：运行指标与 /metrics 接口](docs/adr/0006-metrics-design.md)
+```
+
+# 阶段 8：测试体系与持续集成 —— 放置说明
+
+## 一、文件放置位置
+
+| 本目录文件 | 仓库中的位置 | 说明 |
+| --- | --- | --- |
+| CMakeLists.txt | 同路径覆盖 | 拆出 `myself_core` 静态库；可执行文件与测试分别链接；新增 `WEBSERVER_BUILD_TESTS` 开关 |
+| src/util/Metrics.cpp | 同路径覆盖 | **修复**：Prometheus 直方图桶改为累计语义（阶段 7 的 bug） |
+| tests/unit/CMakeLists.txt | 新增 | 优先系统 GTest，缺失时 FetchContent；注册 ctest |
+| tests/unit/test_buffer.cpp | 新增 | Buffer 单元测试（含用 pipe 测 readFd） |
+| tests/unit/test_http_parser.cpp | 新增 | 半包、粘包、pipelining、请求体、长连接、非法输入 |
+| tests/unit/test_router.cpp | 新增 | 静态文件、404、目录穿越、405、Content-Type |
+| tests/unit/test_metrics.cpp | 新增 | 计数、直方图累计语义、分位、Prometheus 文本、reset、空操作 |
+| tests/unit/test_timer_queue.cpp | 新增 | 一次性、取消、重复、回调内自取消、nextTimeoutMs |
+| tests/unit/test_log_stream.cpp | 新增 | 类型格式化、null、reset |
+| tests/api/conftest.py | 新增 | 启动真实服务二进制并等待端口就绪的夹具 |
+| tests/api/test_http_basic.py | 新增 | HTTP 行为用例 |
+| tests/api/test_metrics.py | 新增 | 指标格式与一致性用例 |
+| tests/api/requirements.txt | 新增 | pytest 与 requests |
+| tests/api/pytest.ini | 新增 | pytest 配置 |
+| scripts/run_unit_tests.sh | 新增 | 一条命令跑单元测试 |
+| scripts/run_api_tests.sh | 新增 | 一条命令跑接口测试（自动建虚拟环境） |
+| .github/workflows/ci.yml | 新增 | GitHub Actions：构建 + 单元测试 + 接口测试 |
+| docs/adr/0007-testing-strategy.md | docs/adr/ | 决策记录 |
+| docs/stage-8-验收记录.md | docs/ | 用例清单、覆盖率、CI 与修复记录 |
+
+## 二、本地运行
+
+```bash
+# 单元测试（46 个用例）
+./scripts/run_unit_tests.sh
+
+# 接口测试（15 个用例，夹具自动拉起服务）
+./scripts/run_api_tests.sh
+
+# 只跑某一个用例
+ctest --test-dir build -R BufferTest --output-on-failure
+pytest tests/api -k metrics -v
+```
+
+离线环境（没有网络下载 GoogleTest）先执行：
+
+```bash
+sudo apt install -y libgtest-dev
+```
+
+CMake 会优先用系统包，不会再去下载。
+
+## 三、持续集成
+
+把 `.github/workflows/ci.yml` 提交后，push 与 PR 会自动执行：配置 → 构建 → `ctest` → `pytest`，
+失败时上传 `logs/` 作为 artifact。
+
+README 里可以加构建徽章（把用户名与仓库名替换掉）：
+
+```markdown
+![ci](https://github.com/<user>/MyselfWebServer/actions/workflows/ci.yml/badge.svg)
+```
+
+## 四、这一版代码的关键点
+
+1. **拆出 `myself_core` 静态库**：测试要能链接业务代码，就不能把一切塞进可执行文件；
+   可执行文件只剩 `main.cpp`。
+2. **测试框架双通道**：`find_package(GTest)` 命中就用系统包（离线可用），否则 FetchContent 下载，
+   CI 与本地都能跑。
+3. **接口测试用真实进程**：夹具用 `subprocess` 启动二进制、轮询端口就绪、结束时 terminate，
+   这样 epoll、多线程与关闭路径都在覆盖范围内。
+4. **测试即文档**：`test_http_parser.cpp` 里的半包与 pipelining 用例，直接说明了协议实现的行为约定。
+5. **顺手修掉一个真实 bug**：阶段 7 的 Prometheus 桶计数是各档独立计数，而 Prometheus 约定
+   `le` 是累计语义，`histogram_quantile()` 会算错；现在渲染时累加，并加了两个用例锁定行为。
+6. **性能不进 CI**：runner 性能抖动大，性能回归放在固定机器上做（阶段 9），CI 只保证功能正确。
+
+## 五、验收标准
+
+1. `./scripts/run_unit_tests.sh` 全绿，用例数不少于 40；
+2. `./scripts/run_api_tests.sh` 全绿；
+3. 故意改坏一处逻辑（例如把 `Content-Length` 去掉）时，能有用例失败；
+4. GitHub Actions 在 push 后自动跑完两个测试步骤；
+5. 覆盖率（若统计）总体不低于 60%；
+6. 能回答：为什么拆静态库、为什么接口测试不用进程内调用、为什么性能测试不放在 CI 里。
+
+## 六、提交
+
+```bash
+git checkout -b stage8-tests-ci
+git add CMakeLists.txt tests scripts .github src/util/Metrics.cpp
+git commit -m "test: 阶段8 单元测试、接口测试与 CI"
+git add docs
+git commit -m "docs: 阶段8 决策记录与验收记录"
+git push -u origin stage8-tests-ci
+```
+
+## 七、README 需要同步的改动
+
+阶段进度表：
+
+```
+| 8 | 测试体系与持续集成 | 已完成 |
+```
+
+新增一节“测试”：
+
+```markdown
+## 测试
+
+![ci](https://github.com/<user>/MyselfWebServer/actions/workflows/ci.yml/badge.svg)
+
+- 单元测试：`./scripts/run_unit_tests.sh`（46 个用例，覆盖 Buffer、HTTP 解析、路由、指标、定时器、日志）
+- 接口测试：`./scripts/run_api_tests.sh`（15 个用例，启动真实二进制验证 HTTP 行为与指标一致性）
+```
+

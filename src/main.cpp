@@ -7,10 +7,12 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -26,6 +28,7 @@
 #include "myself/net/EventLoopThreadPool.h"
 #include "myself/net/TcpConnection.h"
 #include "myself/thread/ThreadPool.h"
+#include "myself/util/Metrics.h"
 #include "myself/util/Version.h"
 
 namespace {
@@ -177,6 +180,56 @@ private:
     std::map<int, std::shared_ptr<myself::TcpConnection>> connections_;
 };
 
+myself::Metrics::MethodKind methodKindOf(myself::HttpRequest::Method method) {
+    switch (method) {
+        case myself::HttpRequest::Method::kGet:
+            return myself::Metrics::kMethodGet;
+        case myself::HttpRequest::Method::kHead:
+            return myself::Metrics::kMethodHead;
+        case myself::HttpRequest::Method::kPost:
+            return myself::Metrics::kMethodPost;
+        default:
+            return myself::Metrics::kMethodOther;
+    }
+}
+
+/// /api/status 的 JSON：模块指标 + 线程与配置信息
+std::string statusJson(const myself::Metrics::Snapshot& data, size_t ioThreads,
+                       size_t workerThreads, double idleSeconds, size_t timers,
+                       uint64_t logLines) {
+    std::ostringstream out;
+    out << std::setprecision(4);
+    const double averageMs =
+        data.latencyCount == 0
+            ? 0.0
+            : data.latencySumMs / static_cast<double>(data.latencyCount);
+
+    out << "{"
+        << "\"name\":\"MyselfWebServer\","
+        << "\"version\":\"" << myself::version() << "\","
+        << "\"uptimeSeconds\":" << data.uptimeSeconds << ","
+        << "\"ioThreads\":" << ioThreads << ","
+        << "\"workerThreads\":" << workerThreads << ","
+        << "\"idleTimeoutSeconds\":" << idleSeconds << ","
+        << "\"timers\":" << timers << ","
+        << "\"connections\":{\"current\":" << data.connectionsCurrent
+        << ",\"total\":" << data.connectionsTotal << ",\"max\":" << data.connectionsMax
+        << "},"
+        << "\"requests\":{\"total\":" << data.requestsTotal
+        << ",\"errors\":" << data.errorsTotal << ",\"byStatusClass\":{\"1xx\":"
+        << data.statusClasses[0] << ",\"2xx\":" << data.statusClasses[1]
+        << ",\"3xx\":" << data.statusClasses[2] << ",\"4xx\":" << data.statusClasses[3]
+        << ",\"5xx\":" << data.statusClasses[4] << "}},"
+        << "\"bytes\":{\"read\":" << data.bytesReadTotal
+        << ",\"written\":" << data.bytesWrittenTotal << "},"
+        << "\"latencyMs\":{\"p50\":" << data.latencyP50Ms << ",\"p95\":" << data.latencyP95Ms
+        << ",\"p99\":" << data.latencyP99Ms << ",\"avg\":" << averageMs
+        << ",\"count\":" << data.latencyCount << "},"
+        << "\"logLines\":" << logLines << ","
+        << "\"status\":\"ok\"}";
+    return out.str();
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -207,6 +260,10 @@ int main(int argc, char* argv[]) {
     }
     myself::Logger::setOutput(logOutput, logFlush);
 
+    // 运行指标：安装全局实例后，net 层与 worker 线程都能通过 metrics::* 上报
+    myself::Metrics metrics;
+    myself::Metrics::install(&metrics);
+
     try {
         myself::EventLoop baseLoop;   // 主线程：只负责 accept
         baseLoop.setName("main");
@@ -236,21 +293,26 @@ int main(int argc, char* argv[]) {
         myself::Router router(options.wwwRoot);
         router.registerHandler(
             "/api/status",
-            [&ioPool, &workerPool, &timerCount,
+            [&metrics, &ioPool, &workerPool, &timerCount,
              idleSeconds = options.idleTimeoutSeconds](const myself::HttpRequest&) {
+                const myself::Metrics::Snapshot data = metrics.snapshot();
                 myself::HttpResponse response;
                 response.setStatus(200, "OK");
                 response.setContentType("application/json; charset=utf-8");
-                response.setBody(
-                    std::string("{\"name\":\"MyselfWebServer\",\"version\":\"") +
-                    myself::version() + "\",\"ioThreads\":" +
-                    std::to_string(ioPool.threadCount()) + ",\"workerThreads\":" +
-                    std::to_string(workerPool.threadCount()) +
-                    ",\"idleTimeoutSeconds\":" + std::to_string(idleSeconds) +
-                    ",\"timers\":" + std::to_string(timerCount.load()) +
-                    ",\"status\":\"ok\"}");
+                response.setBody(statusJson(data, ioPool.threadCount(),
+                                            workerPool.threadCount(), idleSeconds,
+                                            timerCount.load(), myself::Logger::lineCount()));
                 return response;
             });
+
+        // Prometheus 文本格式：可直接被 Prometheus 或 VictoriaMetrics 抓取
+        router.registerHandler("/metrics", [&metrics](const myself::HttpRequest&) {
+            myself::HttpResponse response;
+            response.setStatus(200, "OK");
+            response.setContentType("text/plain; version=0.0.4; charset=utf-8");
+            response.setBody(metrics.renderPrometheus(myself::Logger::lineCount()));
+            return response;
+        });
 
         myself::Acceptor acceptor(&baseLoop, "0.0.0.0", options.port);
 
@@ -274,6 +336,7 @@ int main(int argc, char* argv[]) {
                                 myself::HttpResponse response =
                                     myself::HttpResponse::badRequest("Bad Request");
                                 c->send(response.serialize());
+                                myself::metrics::error();
                                 c->shutdownWrite();
                                 return;
                             }
@@ -285,12 +348,17 @@ int main(int argc, char* argv[]) {
                             const bool headOnly =
                                 request.method() == myself::HttpRequest::Method::kHead;
                             const bool keepAlive = request.isKeepAlive();
+                            const myself::Timestamp requestStart = myself::now();
+                            myself::metrics::requestStarted(methodKindOf(request.method()));
 
                             // 统一出口：无论谁算出响应，最终都在 IO 线程里写回
-                            auto respond = [c, headOnly, keepAlive, ioLoop](
+                            auto respond = [c, headOnly, keepAlive, ioLoop, requestStart](
                                                myself::HttpResponse response) {
                                 response.setCloseConnection(!keepAlive);
                                 c->send(response.serialize(!headOnly));
+                                myself::metrics::requestFinished(
+                                    response.statusCode(),
+                                    myself::msBetween(requestStart, myself::now()));
                                 LOG_INFO << "http status=" << response.statusCode()
                                          << " loop=" << ioLoop->name();
                                 if (!keepAlive) {
@@ -321,11 +389,13 @@ int main(int argc, char* argv[]) {
                     [&registry, fd](const std::shared_ptr<myself::TcpConnection>& c) {
                         LOG_INFO << "close fd=" << fd << " peer=" << c->peerIp() << ":"
                                  << c->peerPort();
+                        myself::metrics::connectionClosed();
                         registry.remove(fd);
                     });
 
                 registry.add(fd, conn);
                 conn->start();
+                myself::metrics::connectionOpened();
                 if (idleSeconds > 0) {
                     conn->setIdleTimeout(idleSeconds);  // 空闲超时在所属 IO 线程内启用
                 }

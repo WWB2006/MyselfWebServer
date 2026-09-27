@@ -39,6 +39,7 @@ add_executable(webserver
     src/http/Router.cpp
 
     src/util/Version.cpp
+    src/util/Metrics.cpp
 )
 
 target_include_directories(webserver PRIVATE include)
