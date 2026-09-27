@@ -9,3 +9,6 @@ __pycache__/
 .idea/
 compile_commands.json
 logs/
+build-asan/
+build-tsan/
+build-cov/

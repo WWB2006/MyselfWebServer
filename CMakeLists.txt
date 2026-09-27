@@ -10,38 +10,27 @@ add_compile_options(-Wall -Wextra -Wpedantic -g)
 # 阶段 4 起使用 std::thread，必须显式链接线程库，否则会报 undefined reference
 find_package(Threads REQUIRED)
 
-add_executable(webserver
-    src/main.cpp
+# 阶段 8：把业务代码编成静态库，可执行文件与单元测试分别链接
+option(WEBSERVER_BUILD_TESTS "构建单元测试（优先用系统 GTest，缺失时联网下载）" OFF)
 
-    src/net/Socket.cpp
-    src/net/Acceptor.cpp
-    src/net/Buffer.cpp
-    src/net/Channel.cpp
-    src/net/Epoller.cpp
-    src/net/EventLoop.cpp
-    src/net/EventLoopThread.cpp
-    src/net/EventLoopThreadPool.cpp
-    src/net/TcpConnection.cpp
-
-    src/thread/ThreadPool.cpp
-
-    src/timer/Timer.cpp
-    src/timer/TimerQueue.cpp
-
-    src/log/LogStream.cpp
-    src/log/Logger.cpp
-    src/log/LogFile.cpp
-    src/log/AsyncLogging.cpp
-
-    src/http/HttpParser.cpp
-    src/http/HttpRequest.cpp
-    src/http/HttpResponse.cpp
-    src/http/Router.cpp
-
-    src/util/Version.cpp
-    src/util/Metrics.cpp
+file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS
+    src/net/*.cpp
+    src/http/*.cpp
+    src/timer/*.cpp
+    src/thread/*.cpp
+    src/log/*.cpp
+    src/util/*.cpp
 )
 
-target_include_directories(webserver PRIVATE include)
-target_link_libraries(webserver PRIVATE Threads::Threads)
+add_library(myself_core STATIC ${CORE_SOURCES})
+target_include_directories(myself_core PUBLIC include)
+target_link_libraries(myself_core PUBLIC Threads::Threads)
+
+add_executable(webserver src/main.cpp)
+target_link_libraries(webserver PRIVATE myself_core)
+
+if(WEBSERVER_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests/unit)
+endif()
 

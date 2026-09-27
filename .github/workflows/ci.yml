@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libgtest-dev python3-pip python3-venv
+
+      - name: 配置（打开单元测试）
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DWEBSERVER_BUILD_TESTS=ON
+
+      - name: 构建
+        run: cmake --build build -j"$(nproc)"
+
+      - name: 单元测试
+        run: ctest --test-dir build --output-on-failure
+
+      - name: 安装接口测试依赖
+        run: python3 -m pip install -r tests/api/requirements.txt
+
+      - name: 接口测试
+        env:
+          MYSELF_TEST_PORT: "18080"
+          MYSELF_WEBSERVER_BIN: ./build/webserver
+        run: pytest tests/api -v
+
+      - name: 上传日志（失败时也上传）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-logs
+          path: logs/
+          if-no-files-found: ignore
