@@ -1,11 +1,219 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <title>MyselfWebServer</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MyselfWebServer · C++ 高性能 Web 服务器</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-soft: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --warn: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 48px 24px; }
+
+  header { text-align: center; padding: 40px 0 48px; }
+  header h1 {
+    font-size: 2.6rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 12px;
+  }
+  header p { color: var(--text-dim); font-size: 1.1rem; }
+  .badges { margin-top: 20px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.82rem;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .badge.ok { border-color: var(--accent2); color: var(--accent2); }
+
+  section { margin-bottom: 40px; }
+  section h2 {
+    font-size: 1.3rem;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--accent);
+  }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    transition: border-color .2s, transform .2s;
+  }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .card h3 { font-size: 1rem; margin-bottom: 8px; color: var(--text); }
+  .card p { font-size: 0.88rem; color: var(--text-dim); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .stat {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+    text-align: center;
+  }
+  .stat .num {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--accent2);
+    font-variant-numeric: tabular-nums;
+  }
+  .stat .label { font-size: 0.82rem; color: var(--text-dim); margin-top: 4px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-dim); font-weight: 500; }
+  td { font-variant-numeric: tabular-nums; }
+
+  code {
+    background: var(--bg-soft);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 0.85em;
+    color: var(--accent);
+  }
+
+  pre {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; color: var(--text); }
+
+  footer {
+    text-align: center;
+    padding-top: 32px;
+    margin-top: 40px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.85rem;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  .links { display: flex; gap: 12px; flex-wrap: wrap; }
+  .links a {
+    display: inline-block;
+    padding: 8px 16px;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 0.88rem;
+    transition: border-color .2s;
+  }
+  .links a:hover { border-color: var(--accent); }
+</style>
 </head>
 <body>
-    <h1>Hello, MyselfWebServer!</h1>
-    <p>阶段 3 静态文件服务已生效。</p>
+<div class="container">
+
+  <header>
+    <h1>MyselfWebServer</h1>
+    <p>从零实现的 C++17 高性能 Web 服务器 · epoll 主从 Reactor</p>
+    <div class="badges">
+      <span class="badge ok">CI passing</span>
+      <span class="badge">C++17</span>
+      <span class="badge">epoll ET</span>
+      <span class="badge">多线程</span>
+      <span class="badge">HTTP/1.1</span>
+      <span class="badge">Prometheus</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>核心指标</h2>
+    <div class="stats">
+      <div class="stat"><div class="num">17.1k</div><div class="label">QPS 峰值</div></div>
+      <div class="stat"><div class="num">19ms</div><div class="label">P99 延迟</div></div>
+      <div class="stat"><div class="num">46</div><div class="label">单元测试</div></div>
+      <div class="stat"><div class="num">15</div><div class="label">接口测试</div></div>
+      <div class="stat"><div class="num">6/6</div><div class="label">故障注入</div></div>
+      <div class="stat"><div class="num">0MB</div><div class="label">长稳 RSS 增长</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>架构</h2>
+    <div class="cards">
+      <div class="card"><h3>主从 Reactor</h3><p>主线程 accept，4 个 IO 线程各跑一个 EventLoop，轮询分配连接</p></div>
+      <div class="card"><h3>epoll ET</h3><p>边缘触发 + 非阻塞，一次事件循环读到 EAGAIN</p></div>
+      <div class="card"><h3>异步日志</h3><p>双缓冲后端线程，多线程压测下日志不交错</p></div>
+      <div class="card"><h3>定时器</h3><p>最小堆 + timerfd，空闲连接超时自动关闭</p></div>
+      <div class="card"><h3>过载保护</h3><p>超过最大连接数返回 503，拒绝计数可观测</p></div>
+      <div class="card"><h3>优雅退出</h3><p>SIGINT/SIGTERM 信号安全，连接逐个收尾</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>压测数据</h2>
+    <table>
+      <thead>
+        <tr><th>并发</th><th>QPS</th><th>P50</th><th>P99</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>10</td><td>13195</td><td>0.49ms</td><td>4.02ms</td></tr>
+        <tr><td>50</td><td>16489</td><td>2.90ms</td><td>12.02ms</td></tr>
+        <tr><td>100</td><td><strong>17128</strong></td><td>5.77ms</td><td>19.22ms</td></tr>
+        <tr><td>200</td><td>15587</td><td>12.84ms</td><td>37.20ms</td></tr>
+        <tr><td>500</td><td>16049</td><td>30.91ms</td><td>83.36ms</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>快速开始</h2>
+    <pre><code>cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+./build/webserver -t 4 -m 500 -i 30 -p 8080</code></pre>
+  </section>
+
+  <section>
+    <h2>接口</h2>
+    <div class="links">
+      <a href="/api/status">/api/status</a>
+      <a href="/metrics">/metrics</a>
+      <a href="/index.html">/index.html</a>
+    </div>
+  </section>
+
+  <footer>
+    <p>GitHub: <a href="https://github.com/WWB2006/MyselfWebServer">WWB2006/MyselfWebServer</a></p>
+    <p style="margin-top:8px">阶段 1~9 全部完成 · 2026</p>
+  </footer>
+
+</div>
 </body>
 </html>
