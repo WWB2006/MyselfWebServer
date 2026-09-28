@@ -34,6 +34,8 @@ public:
     static HttpResponse notFound();
     static HttpResponse badRequest(const std::string& reason);
     static HttpResponse payloadTooLarge();
+    /// 过载保护：连接数超过上限时返回，提示客户端稍后重试
+    static HttpResponse serviceUnavailable();
 
 private:
     int statusCode_{200};

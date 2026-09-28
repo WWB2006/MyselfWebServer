@@ -69,4 +69,12 @@ HttpResponse HttpResponse::payloadTooLarge() {
     return makeError(413, "Payload Too Large");
 }
 
+HttpResponse HttpResponse::serviceUnavailable() {
+    HttpResponse response(true);
+    response.setStatus(503, "Service Unavailable");
+    response.setContentType("text/plain; charset=utf-8");
+    response.setBody("server is at connection limit, please retry later\n");
+    return response;
+}
+
 }  // namespace myself

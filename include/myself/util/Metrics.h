@@ -29,6 +29,7 @@ public:
     /// 某一时刻的指标快照
     struct Snapshot {
         uint64_t connectionsTotal{0};
+        uint64_t connectionsRejected{0};
         int64_t connectionsCurrent{0};
         uint64_t connectionsMax{0};
         uint64_t requestsTotal{0};
@@ -50,6 +51,8 @@ public:
 
     void onConnectionOpened();
     void onConnectionClosed();
+    /// 超过连接上限被拒绝：计入拒绝数，不改变在线连接数
+    void onConnectionRejected();
 
     void onRequestStarted(MethodKind kind);
     /// statusCode 用于归类到 1xx..5xx；latencyMs 进入直方图
@@ -76,6 +79,7 @@ private:
     static double quantileFromBuckets(const uint64_t* buckets, uint64_t total, double q);
 
     std::atomic<uint64_t> connectionsTotal_{0};
+    std::atomic<uint64_t> connectionsRejected_{0};
     std::atomic<int64_t> connectionsCurrent_{0};
     std::atomic<uint64_t> connectionsMax_{0};
     std::atomic<uint64_t> requestsTotal_{0};
@@ -95,6 +99,7 @@ namespace metrics {
 
 void connectionOpened();
 void connectionClosed();
+void connectionRejected();
 void requestStarted(Metrics::MethodKind kind);
 void requestFinished(int statusCode, double latencyMs);
 void error();

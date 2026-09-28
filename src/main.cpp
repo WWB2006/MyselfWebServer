@@ -1,6 +1,8 @@
 // 阶段 5：在主从 Reactor 之上加入定时器。
 // 空闲连接超时、周期性统计都通过 EventLoop 的定时器接口实现。
 
+#include <unistd.h>
+
 #include <atomic>
 #include <csignal>
 #include <cstddef>
@@ -38,6 +40,13 @@ namespace {
 myself::AsyncLogging* g_asyncLog = nullptr;
 bool g_consoleOutput = true;
 std::mutex g_consoleMutex;
+std::atomic<bool> g_shutdownRequested{false};
+
+/// 信号处理函数里只能做异步信号安全的操作，因此只设置标志，
+/// 真正的收尾由事件循环里的定时任务完成。
+void onTerminationSignal(int) {
+    g_shutdownRequested.store(true);
+}
 
 void logOutput(const char* data, size_t len) {
     if (g_asyncLog != nullptr) {
@@ -69,17 +78,19 @@ struct ServerOptions {
     std::string logDir;              // 为空表示只输出到控制台
     size_t logRollSizeMb{32};        // 单个日志文件大小上限
     bool quiet{false};               // 只写文件，不输出到控制台
+    size_t maxConnections{0};        // >0 时启用过载保护，超出返回 503
 };
 
 void printUsage(const char* program) {
     std::cout << "usage: " << program << " [-p port] [-r wwwRoot] [-t ioThreads] "
-                 "[-w workerThreads] [-i idleSeconds]\n"
+                 "[-w workerThreads] [-i idleSeconds] [-m maxConnections]\n"
                  "       [-l logLevel] [-g logDir] [-s rollSizeMb] [-q] [-h]\n"
               << "  -p port          监听端口，默认 8080\n"
               << "  -r wwwRoot       静态资源目录，默认 www\n"
               << "  -t ioThreads     IO 线程数，默认 4，0 表示单线程\n"
               << "  -w workerThreads 计算线程池大小，默认 0（关闭）\n"
               << "  -i idleSeconds   空闲连接超时秒数，默认 0（不启用）\n"
+              << "  -m maxConnections 最大并发连接数，默认 0（不限制），超出返回 503\n"
               << "  -l logLevel      日志级别 trace/debug/info/warn/error，默认 info\n"
               << "  -g logDir        日志目录（启用异步落盘），默认只输出控制台\n"
               << "  -s rollSizeMb    单个日志文件大小上限，默认 32MB\n"
@@ -136,6 +147,11 @@ ParseResult parseArgs(int argc, char* argv[], ServerOptions* options) {
             options->quiet = true;
             continue;
         }
+        if (arg == "-m" && hasValue) {
+            options->maxConnections =
+                static_cast<size_t>(std::strtoul(argv[++i], nullptr, 10));
+            continue;
+        }
         std::cerr << "unknown or incomplete argument: " << arg << "\n";
         printUsage(argv[0]);
         return ParseResult::kError;
@@ -151,9 +167,13 @@ public:
         connections_[fd] = conn;
     }
 
-    void remove(int fd) {
+    /// 只在这个 fd 当前对应的连接就是 conn 时才移除，避免 fd 复用后误删新连接。
+    void removeIfMatch(int fd, const std::shared_ptr<myself::TcpConnection>& conn) {
         std::lock_guard<std::mutex> lock(mutex_);
-        connections_.erase(fd);
+        auto it = connections_.find(fd);
+        if (it != connections_.end() && it->second == conn) {
+            connections_.erase(it);
+        }
     }
 
     size_t size() const {
@@ -244,6 +264,8 @@ int main(int argc, char* argv[]) {
     }
 
     std::signal(SIGPIPE, SIG_IGN);
+    std::signal(SIGINT, onTerminationSignal);
+    std::signal(SIGTERM, onTerminationSignal);
 
     // 日志系统初始化：级别过滤 + 可选的异步文件输出
     myself::Logger::setLevel(myself::logLevelFromString(options.logLevel));
@@ -290,6 +312,15 @@ int main(int argc, char* argv[]) {
                      << " up=" << (myself::elapsedMs(myself::now()) / 1000) << "s";
         });
 
+        // 优雅退出：收到 SIGINT/SIGTERM 后停止接收新连接并收尾
+        baseLoop.runEvery(0.2, [&baseLoop] {
+            if (!g_shutdownRequested.load()) {
+                return;
+            }
+            LOG_INFO << "shutdown requested, stopping event loop";
+            baseLoop.quit();
+        });
+
         myself::Router router(options.wwwRoot);
         router.registerHandler(
             "/api/status",
@@ -317,6 +348,19 @@ int main(int argc, char* argv[]) {
         myself::Acceptor acceptor(&baseLoop, "0.0.0.0", options.port);
 
         acceptor.setNewConnectionCallback([&](int connfd, std::string ip, uint16_t peerPort) {
+            // 过载保护：超过上限直接回 503 并关闭，避免服务被压垮时表现为随机超时
+            if (options.maxConnections > 0 && registry.size() >= options.maxConnections) {
+                myself::metrics::connectionRejected();
+                LOG_WARN << "connection rejected, online=" << registry.size()
+                         << " limit=" << options.maxConnections << " peer=" << ip << ":"
+                         << peerPort;
+                const std::string raw = myself::HttpResponse::serviceUnavailable().serialize();
+                const ssize_t ignored = ::write(connfd, raw.data(), raw.size());
+                (void)ignored;  // 尽力而为：写不出去就直接关闭
+                ::close(connfd);
+                return;
+            }
+
             myself::EventLoop* ioLoop = ioPool.nextLoop();
 
             // 连接必须在它所属的 IO 线程里创建并注册事件，否则就是跨线程操作 epoll
@@ -390,7 +434,7 @@ int main(int argc, char* argv[]) {
                         LOG_INFO << "close fd=" << fd << " peer=" << c->peerIp() << ":"
                                  << c->peerPort();
                         myself::metrics::connectionClosed();
-                        registry.remove(fd);
+                        registry.removeIfMatch(fd, c);
                     });
 
                 registry.add(fd, conn);
@@ -413,6 +457,7 @@ int main(int argc, char* argv[]) {
 
         baseLoop.loop();
 
+        LOG_INFO << "event loop stopped, closing connections";
         // 退出：先让每条连接在自己的 IO 线程里关闭，再回收线程池
         registry.closeAll();
         workerPool.stop();

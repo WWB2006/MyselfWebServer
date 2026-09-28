@@ -42,6 +42,10 @@ void Metrics::onConnectionClosed() {
     connectionsCurrent_.fetch_sub(1);
 }
 
+void Metrics::onConnectionRejected() {
+    connectionsRejected_.fetch_add(1);
+}
+
 void Metrics::onRequestStarted(MethodKind kind) {
     if (kind >= 0 && kind < kMethodCount) {
         methodCounts_[kind].fetch_add(1);
@@ -85,6 +89,7 @@ void Metrics::onBytesWritten(size_t bytes) {
 
 void Metrics::reset() {
     connectionsTotal_.store(0);
+    connectionsRejected_.store(0);
     connectionsCurrent_.store(0);
     connectionsMax_.store(0);
     requestsTotal_.store(0);
@@ -137,6 +142,7 @@ double Metrics::quantileFromBuckets(const uint64_t* buckets, uint64_t total, dou
 Metrics::Snapshot Metrics::snapshot() const {
     Snapshot result;
     result.connectionsTotal = connectionsTotal_.load();
+    result.connectionsRejected = connectionsRejected_.load();
     result.connectionsCurrent = connectionsCurrent_.load();
     result.connectionsMax = connectionsMax_.load();
     result.requestsTotal = requestsTotal_.load();
@@ -176,6 +182,9 @@ std::string Metrics::renderPrometheus(uint64_t logLines) const {
     out << "# HELP myself_connections_total 累计接受的连接数\n"
         << "# TYPE myself_connections_total counter\n"
         << "myself_connections_total " << data.connectionsTotal << "\n"
+        << "# HELP myself_connections_rejected_total 超过连接上限被拒绝的连接数\n"
+        << "# TYPE myself_connections_rejected_total counter\n"
+        << "myself_connections_rejected_total " << data.connectionsRejected << "\n"
         << "# HELP myself_connections_current 当前在线连接数\n"
         << "# TYPE myself_connections_current gauge\n"
         << "myself_connections_current " << data.connectionsCurrent << "\n"
@@ -264,6 +273,12 @@ void connectionOpened() {
 void connectionClosed() {
     if (Metrics* m = Metrics::global()) {
         m->onConnectionClosed();
+    }
+}
+
+void connectionRejected() {
+    if (Metrics* m = Metrics::global()) {
+        m->onConnectionRejected();
     }
 }
 

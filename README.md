@@ -1,3 +1,4 @@
+![ci](https://github.com/WWB2006/MyselfWebServer/actions/workflows/ci.yml/badge.svg)
 # MyselfWebServer
 
 基于 epoll 的 C++17 高并发网络服务器，用于系统学习 Linux 网络编程与服务器工程化实践。
@@ -1042,5 +1043,103 @@ git push -u origin stage8-tests-ci
 
 - 单元测试：`./scripts/run_unit_tests.sh`（46 个用例，覆盖 Buffer、HTTP 解析、路由、指标、定时器、日志）
 - 接口测试：`./scripts/run_api_tests.sh`（15 个用例，启动真实二进制验证 HTTP 行为与指标一致性）
+```
+
+# 阶段 9：性能与健壮性 —— 放置说明
+
+## 一、文件放置位置
+
+| 本目录文件 | 仓库中的位置 | 说明 |
+| --- | --- | --- |
+| src/main.cpp | 同路径覆盖 | 新增 `-m` 过载保护与 SIGINT/SIGTERM 优雅退出 |
+| include/myself/util/Metrics.h、src/util/Metrics.cpp | 同路径覆盖 | 新增 `connections_rejected` 计数与同名 Prometheus 指标 |
+| include/myself/http/HttpResponse.h、src/http/HttpResponse.cpp | 同路径覆盖 | 新增 `serviceUnavailable()`（503） |
+| scripts/bench_matrix.sh | 新增 | 并发梯度压测，结果写 CSV |
+| scripts/soak_test.sh | 新增 | 长稳采样（RSS、在线连接、请求数、错误数） |
+| scripts/flamegraph.sh | 新增 | perf 采样加 FlameGraph 生成 SVG |
+| scripts/fault_injection.py | 新增 | 六类故障注入用例，输出 PASS/FAIL |
+| docs/bench/README.md | 新增 | 数据目录规范与字段说明 |
+| docs/adr/0008-performance-and-robustness.md | docs/adr/ | 决策记录 |
+| docs/stage-9-验收记录.md | docs/ | 压测矩阵、故障注入、长稳与退出验证表 |
+| .gitignore | 同路径覆盖 | 忽略 `.pytest_cache/`、`third_party/`、perf 原始数据 |
+
+## 二、构建与运行
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+./build/webserver -t 4 -m 512 -i 30 -l warn -q -g logs -p 8080
+```
+
+| 参数 | 作用 |
+| --- | --- |
+| `-m 512` | 最大并发连接数，超出返回 503 并计数（0 表示不限制） |
+| `-i 30` | 空闲连接 30 秒断开（故障注入的慢连接用例需要它） |
+| Ctrl+C | 优雅退出：日志出现 `shutdown requested`，连接与日志正常收尾 |
+
+## 三、四项验证
+
+```bash
+# 1. 压测矩阵（客户端在宿主机执行）
+./scripts/bench_matrix.sh 8080 "1 10 50 100 200 500" 30s
+
+# 2. 火焰图（需要 perf 权限）
+sudo ./scripts/flamegraph.sh $(pgrep webserver) 30
+
+# 3. 故障注入（服务端要带 -i 参数）
+python3 scripts/fault_injection.py --port 8080 --idle-timeout 30
+
+# 4. 长稳采样（先跑 1 小时，正式数据建议 24 小时）
+./scripts/soak_test.sh 4 8080 3600 30
+```
+
+## 四、这一版代码的关键点
+
+1. **过载保护给出明确结果**：超过 `-m` 的连接立刻收到 503 并关闭，而不是让客户端等到超时；
+   同时累加 `myself_connections_rejected_total`，压测时能定量说明拒绝了多少。
+2. **信号处理只做一件事**：SIGINT/SIGTERM 只设置原子标志（异步信号安全），
+   真正的收尾放在事件循环的 200ms 定时任务里。
+3. **退出顺序**：停下事件循环 → 把连接交回各自的 IO 线程关闭 → 停工作线程池 → 刷日志 →
+   停异步日志线程，保证日志不丢、连接不残。
+4. **压测方法学**：客户端与服务端分离、并发梯度、每条数据带环境注释，
+   避免出现"数字很好看但无法复现"的情况。
+5. **数据归档**：CSV 与火焰图进 `docs/bench/`，README 只引用文件与结论。
+
+## 五、验收标准
+
+1. 六类故障注入全部 PASS（慢连接用例需服务端启用 `-i`）；
+2. 压测矩阵至少 5 档并发，QPS 与 P99 完整，能说清瓶颈在哪；
+3. 有火焰图或替代性的热点分析证据；
+4. `-m 8` 时并发 20 条连接，超出部分收到 503，拒绝计数同步增加；
+5. 压测中 Ctrl+C 能优雅退出，日志完整，`ss -tn state established | wc -l` 回落；
+6. 长稳采样至少 1 小时，RSS 增长不超过 5%。
+
+## 六、提交
+
+```bash
+git checkout -b stage9-performance
+git add include src scripts docs .gitignore
+git commit -m "perf: 阶段9 压测矩阵、火焰图、故障注入与过载保护"
+git push -u origin stage9-performance
+```
+
+## 七、README 需要同步的改动
+
+阶段进度表：
+
+```
+| 9 | 性能与健壮性 | 已完成 |
+```
+
+“数据与结论”一节替换为：
+
+```markdown
+## 数据与结论
+
+- 压测矩阵：`docs/bench/bench-matrix-*.csv`（并发 1 到 500，含 QPS 与 P99）
+- 火焰图：`docs/bench/flame-*.svg`
+- 长稳采样：`docs/bench/soak-*.csv`（RSS 增长小于 5%，错误数不增长）
+- 故障注入：半包、粘包、慢连接、超长头/体、连接抖动全部通过
+- 过载保护：`-m` 生效时返回 503，`myself_connections_rejected_total` 可观测
 ```
 

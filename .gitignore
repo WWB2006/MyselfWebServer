@@ -12,3 +12,9 @@ logs/
 build-asan/
 build-tsan/
 build-cov/
+.pytest_cache/
+third_party/
+docs/bench/perf-*.data
+docs/bench/perf-*.script
+docs/bench/perf-*.folded
+stage/
