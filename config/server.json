@@ -1,0 +1,13 @@
+{
+  "port": 8080,
+  "wwwRoot": "www",
+  "ioThreads": 4,
+  "workerThreads": 0,
+  "idleTimeoutSeconds": 30,
+  "maxConnections": 512,
+  "logLevel": "info",
+  "logDir": "logs",
+  "rollSizeMb": 32,
+  "maxRequestBody": 1048576,
+  "_note": "参数与 main.cpp 的命令行开关一一对应；当前版本只从命令行读取，配置文件留作部署模板。"
+}

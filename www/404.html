@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>404 Not Found · MyselfWebServer</title>
+  <!-- 单文件、零外部依赖，与 index.html 保持同一套配色。 -->
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      padding: 2.5rem 1.5rem;
+      font: 16px/1.7 -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+    main { max-width: 46rem; margin: 0 auto; }
+    h1 { font-size: 1.75rem; margin: 0 0 .35rem; }
+    .sub { color: #94a3b8; margin: 0 0 2rem; }
+    code, a { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    a { color: #7dd3fc; }
+    .note { margin-top: 2rem; padding: .9rem 1rem; border-left: 3px solid #7dd3fc;
+            background: #16233a; color: #cbd5e1; font-size: .925rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>404 Not Found</h1>
+    <p class="sub">请求的路径不存在。</p>
+    <p>可访问的入口：<a href="/">/</a>、<a href="/api/status">/api/status</a>、<a href="/metrics">/metrics</a></p>
+    <p class="note">
+      说明：当前版本的 <code>Router</code> 命中未注册路径时由
+      <code>HttpResponse::notFound()</code> 直接生成 404 响应体，
+      并不会读取本文件；本页是阶段 0 骨架留下的静态示例，
+      保留它是为了让 <code>www/</code> 目录在静态文件服务实现前后都有一份完整的示例资源。
+    </p>
+  </main>
+</body>
+</html>
