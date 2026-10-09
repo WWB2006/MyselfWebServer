@@ -23,23 +23,15 @@ AsyncLogging::~AsyncLogging() {
 }
 
 void AsyncLogging::start() {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (running_) {
-            return;
-        }
-        running_ = true;
+    if (running_.exchange(true)) {
+        return;
     }
     thread_ = std::thread([this] { threadFunc(); });
 }
 
 void AsyncLogging::stop() {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!running_) {
-            return;
-        }
-        running_ = false;
+    if (!running_.exchange(false)) {
+        return;
     }
     cv_.notify_one();
     if (thread_.joinable()) {
@@ -68,12 +60,20 @@ void AsyncLogging::append(const char* data, size_t len) {
 }
 
 void AsyncLogging::flush() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (current_ != nullptr && current_->length() > 0) {
-        logFile_.append(current_->data(), current_->length());
-        current_->reset();
+    // 只做「把当前缓冲交给后台线程」这一件事。
+    // LogFile 只允许后台线程写：早期版本在这里直接 append + flush，
+    // 会与 threadFunc 的落盘并发写同一个文件，属于数据竞争。
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (current_ != nullptr && current_->length() > 0) {
+            buffers_.push_back(std::move(current_));
+        }
+        if (current_ == nullptr) {
+            current_ = (next_ != nullptr) ? std::move(next_) : BufferPtr(new Buffer);
+            current_->reset();
+        }
     }
-    logFile_.flush();
+    cv_.notify_one();
 }
 
 void AsyncLogging::threadFunc() {
@@ -85,12 +85,12 @@ void AsyncLogging::threadFunc() {
     std::vector<BufferPtr> buffersToWrite;
     buffersToWrite.reserve(16);
 
-    while (running_) {
+    while (running_.load()) {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             if (buffers_.empty()) {
                 cv_.wait_for(lock, std::chrono::duration<double>(flushIntervalSeconds_),
-                             [this] { return !buffers_.empty() || !running_; });
+                             [this] { return !buffers_.empty() || !running_.load(); });
             }
 
             buffers_.push_back(std::move(current_));

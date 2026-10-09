@@ -60,4 +60,3 @@ void Channel::handleEvent() {
 }
 
 }  // namespace myself
-

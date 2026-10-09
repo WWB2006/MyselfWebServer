@@ -7,7 +7,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 验收日期 | 2026-09-24 |
+| 验收日期 | 2026-09-22 |
 | 验收人 | （填写你的名字） |
 | 项目路径 | `~/code/MyselfWebServer` |
 | 提交版本 | `chore: init project skeleton` 对应的提交号：`（填写 git log 里的短哈希）` |
@@ -28,11 +28,11 @@
 | 序号 | 检查项 | 命令 | 期望结果 | 实际结果 |
 | --- | --- | --- | --- | --- |
 | 1 | 配置 | `cmake -B build -DCMAKE_BUILD_TYPE=Debug` | 配置成功，无报错 |  |
-| 2 | 构建 | `cmake --build build -j$(nproc)` | 生成 `build/bin/MyselfWebServer` |  |
-| 3 | 运行 | `./build/bin/MyselfWebServer -p 8080` | 打印启动日志并退出 |  |
-| 4 | 参数解析 | `./build/bin/MyselfWebServer -h` | 打印用法说明 |  |
-| 5 | 错误参数 | `./build/bin/MyselfWebServer -x` | 返回非零并提示未知参数 |  |
-| 6 | 调试 | `gdb -q ./build/bin/MyselfWebServer -ex 'break main' -ex run -ex quit` | 能停在 main |  |
+| 2 | 构建 | `cmake --build build -j$(nproc)` | 生成 `build/webserver` |  |
+| 3 | 运行 | `./build/webserver -p 8080` | 打印启动日志并退出 |  |
+| 4 | 参数解析 | `./build/webserver -h` | 打印用法说明 |  |
+| 5 | 错误参数 | `./build/webserver -x` | 返回非零并提示未知参数 |  |
+| 6 | 调试 | `gdb -q ./build/webserver -ex 'break main' -ex run -ex quit` | 能停在 main |  |
 | 7 | 单元测试 | `cmake -B build -DWEBSERVER_BUILD_TESTS=ON && ctest --test-dir build --output-on-failure` | 用例全部通过 |  |
 | 8 | 忽略生效 | `git status --short` | 看不到 `build/` 等产物 |  |
 
@@ -41,9 +41,9 @@
 | 交付物 | 完成标准 | 状态 |
 | --- | --- | --- |
 | 目录结构 | 与 ADR 0002 中的分层一致 | □ |
-| 构建脚本 | 顶层与 src 的 CMakeLists 齐全，产物输出到 build/bin | □ |
+| 构建脚本 | 顶层与 src 的 CMakeLists 齐全，产物输出到 build/ | □ |
 | 程序入口 | 只做装配，能打印版本与端口 | □ |
-| 规范文件 | `.clang-format`、`.editorconfig`、`.gitignore`、`.vscode` | □ |
+| 规范文件 | `.clang-format`、`.editorconfig`、`.gitignore` 已就位（`.vscode/` 属本地配置，已在 `.gitignore` 中忽略，不入库） | □ |
 | 脚本 | build / run / bench / sanitize 四个脚本可执行 | □ |
 | 文档 | README、两篇 ADR、本验收记录 | □ |
 | 提交 | 已完成首次提交并推送到 GitHub | □ |

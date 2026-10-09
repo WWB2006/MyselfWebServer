@@ -73,6 +73,7 @@ Socket Socket::listenOn(const std::string& ip, int port, int backlog) {
         throw sysError("socket");
     }
 
+    // 复用地址，避免重启时因为 TIME_WAIT 报 Address already in use
     sock.setReuseAddr(true);
 
     sockaddr_in addr{};
@@ -90,7 +91,6 @@ Socket Socket::listenOn(const std::string& ip, int port, int backlog) {
     if (::listen(sock.fd(), backlog) < 0) {
         throw sysError("listen");
     }
-    sock.setNonBlocking(true);
     return sock;
 }
 

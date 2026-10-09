@@ -1,1145 +1,208 @@
-![ci](https://github.com/WWB2006/MyselfWebServer/actions/workflows/ci.yml/badge.svg)
 # MyselfWebServer
 
-基于 epoll 的 C++17 高并发网络服务器，用于系统学习 Linux 网络编程与服务器工程化实践。
+![ci](https://github.com/your-name/MyselfWebServer/actions/workflows/ci.yml/badge.svg)
+![c++17](https://img.shields.io/badge/C%2B%2B-17-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
 
-项目从最小可运行的工程骨架开始，按阶段逐步实现阻塞模型、非阻塞 Reactor、HTTP 协议解析、
-线程池、定时器与日志系统，每个阶段都保留可运行版本与设计决策记录。
+基于 epoll ET 模式与主从 Reactor 的 C++17 高并发 HTTP 服务器，包含事件循环、定时器、
+分级异步日志、Prometheus 指标、过载保护与完整测试体系。
 
-## 当前状态
+项目以学习为目的从零实现，核心模块自行编写，参考了 TinyWebServer 与 muduo 的设计思路。
 
-**阶段 0 已完成**：工程骨架可构建、可运行，具备统一的目录结构、构建脚本、编码规范与文档体系。
-下一步进入阶段 1（阻塞式 TCP 回显服务）。
+## 特性
+
+| 能力 | 实现要点 |
+| --- | --- |
+| 网络模型 | 非阻塞 socket + epoll ET，主线程 accept，N 个 IO 线程读写（one loop per thread） |
+| HTTP | HTTP/1.1 请求解析（有限状态机），支持 GET 与 HEAD、keep-alive、静态文件、路由注册、目录穿越防护 |
+| 连接管理 | shared_ptr + Channel::tie 保活，写缓冲与 EPOLLOUT 回填，超时与异常统一收口 |
+| 定时器 | 由 epoll_wait 超时驱动，支持一次性与重复任务、取消，空闲连接自动断开 |
+| 日志 | 分级（trace/debug/info/warn/error）、异步双缓冲落盘、按大小与日期轮转 |
+| 可观测性 | `/metrics`（Prometheus 文本格式）与 `/api/status`（JSON），含延迟直方图与错误计数 |
+| 健壮性 | 最大连接数限制（超出返回 503）、空闲超时、SIGINT/SIGTERM 优雅退出 |
+| 工程化 | CMake 多目标构建、GoogleTest 单元测试、pytest 接口测试、GitHub Actions 持续集成 |
+
+## 架构
+
+```
+                    ┌──────────────────────────────┐
+   客户端 ──TCP──▶  │ 主线程 EventLoop（只负责 accept）│
+                    └───────────────┬──────────────┘
+                                    │ 轮询分配（nextLoop）
+              ┌─────────────────────┼─────────────────────┐
+              ▼                     ▼                     ▼
+        io-0 EventLoop        io-1 EventLoop        io-N EventLoop
+        （epoll ET + 定时器）   （epoll ET + 定时器）   （epoll ET + 定时器）
+              │                     │                     │
+              └──────────┬──────────┴──────────┬──────────┘
+                         ▼                     ▼
+                  TcpConnection          TcpConnection
+                  （Buffer/Channel）      （Buffer/Channel）
+                         │
+                         ▼
+              HttpParser（状态机，半包/粘包）
+                         │
+                         ▼
+        Router ──▶ 静态文件 / /api/status / /metrics
+                         │
+                         ▼
+              HttpResponse ──▶ 写回（IO 线程）
+
+   可选：worker 线程池负责静态文件读取等耗时任务，回写统一由 ioLoop->runInLoop 回到 IO 线程
+```
+
+一次请求的路径：`accept → 分配到某个 ioLoop → TcpConnection 读入 Buffer → HttpParser 解析
+→ Router 生成响应 → 写回（必要时经 worker 线程池与 runInLoop）→ 指标与日志记录`。
+详细分层与并发约束见 [docs/architecture.md](docs/architecture.md)。
 
 ## 快速开始
 
-依赖：Ubuntu 22.04 及以上（或任意带 GCC 11 与 CMake 3.16 的 Linux 发行版）。
+依赖：Ubuntu 22.04 及以上、GCC 11+、CMake 3.16+。
 
 ```bash
-# 1. 构建
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-
-# 2. 编译
+# 构建
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 
-# 3. 运行
-./build/bin/MyselfWebServer -p 8080
+# 运行（4 个 IO 线程，最多 512 个连接，空闲 30 秒断开，日志异步落盘）
+./build/webserver -t 4 -m 512 -i 30 -l info -g logs -p 8080
 ```
 
-期望输出：
-
-```
-webserver 0.1.0 (stage 0 skeleton) starting, listen port = 8080
-stage 0 done: next step is the blocking TCP echo server
-```
-
-### 启用单元测试
-
-单元测试使用 GoogleTest，通过 CMake 的 FetchContent 拉取，需要联网：
+打开浏览器访问 `http://<主机IP>:8080/`，或：
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug -DWEBSERVER_BUILD_TESTS=ON
-cmake --build build -j"$(nproc)"
-ctest --test-dir build --output-on-failure
+curl -i http://127.0.0.1:8080/index.html     # 静态文件
+curl -s http://127.0.0.1:8080/api/status     # JSON 状态
+curl -s http://127.0.0.1:8080/metrics        # Prometheus 指标
 ```
 
-网络不便时改用系统包：`sudo apt install -y libgtest-dev`，并把 `tests/unit/CMakeLists.txt`
-里的 FetchContent 段替换为 `find_package(GTest REQUIRED)`。
+### 运行参数
 
-### 常用脚本
-
-| 脚本 | 用途 |
-| --- | --- |
-| `scripts/build.sh` | 一条命令构建（可用 `BUILD_TYPE=Release` 覆盖构建类型） |
-| `scripts/run.sh` | 按 `PORT` 环境变量启动服务 |
-| `scripts/bench.sh` | 压测并把环境与结果写入 `docs/bench/` |
-| `scripts/sanitize.sh asan\|tsan` | 带消毒器的构建，用于排查内存与竞态问题 |
-
-## 目录结构
-
-| 目录 | 职责 |
-| --- | --- |
-| `include/myself/` | 对外头文件，按模块分目录（net、http、timer、thread、log、util） |
-| `src/` | 实现文件，与 `include` 结构保持一致；`main.cpp` 只做装配 |
-| `tests/unit/` | GoogleTest 单元测试 |
-| `tests/api/` | pytest 接口测试（阶段 3 之后补齐） |
-| `scripts/` | 构建、运行、压测与消毒器脚本 |
-| `docs/adr/` | 关键设计决策记录，一次决定一页 |
-| `docs/bench/` | 压测原始数据与汇总 |
-| `www/` | 静态资源 |
-| `config/` | 运行配置 |
-
-依赖方向是单向的：`util` 不依赖任何模块，`net` 依赖 `util` 与 `log`，
-`http` 依赖 `net`，`main.cpp` 负责装配全部模块。详细约定见 ADR 0002。
-
-## 阶段进度
-
-| 阶段 | 内容 | 状态 |
+| 参数 | 说明 | 默认值 |
 | --- | --- | --- |
-| 0 | 工程骨架与 CMake | 已完成 |
-| 1 | 阻塞式 TCP 回显服务 | 进行中 |
-| 2 | 非阻塞 epoll 事件循环 | 待开始 |
-| 3 | HTTP 解析、静态文件与路由 | 待开始 |
-| 4 | 线程池与主从 Reactor | 待开始 |
-| 5 | 定时器与空闲连接超时 | 待开始 |
-| 6 | 日志系统 | 待开始 |
-| 7 | 运行指标与接口扩展 | 待开始 |
-| 8 | 测试体系与持续集成 | 待开始 |
-| 9 | 性能优化与稳定性验证 | 待开始 |
+| `-p port` | 监听端口 | 8080 |
+| `-r wwwRoot` | 静态资源目录 | `www` |
+| `-t ioThreads` | IO 线程数，`0` 表示单线程（用于对比压测） | 4 |
+| `-w workerThreads` | 计算线程池大小，`0` 表示关闭 | 0 |
+| `-i idleSeconds` | 空闲连接超时秒数，`0` 表示不启用 | 0 |
+| `-m maxConnections` | 最大并发连接数，超出返回 503，`0` 表示不限制 | 0 |
+| `-l logLevel` | 日志级别 trace/debug/info/warn/error | info |
+| `-g logDir` | 日志目录（启用异步落盘） | 仅控制台 |
+| `-s rollSizeMb` | 单个日志文件大小上限 | 32 |
+| `-q` | 静默模式：不输出到控制台 | 关闭 |
+| `-h` | 显示帮助 | - |
+
+### 接口
+
+| 路径 | 方法 | 说明 |
+| --- | --- | --- |
+| `/`、`/index.html` | GET / HEAD | 静态文件，未命中返回 404 |
+| `/api/status` | GET | JSON：连接数、请求数、错误数、字节数、延迟分位、日志行数、运行时长 |
+| `/metrics` | GET | Prometheus 文本格式，含 `myself_*` 计数器与延迟直方图 |
+
+## 测试
+
+```bash
+./scripts/run_unit_tests.sh      # GoogleTest 单元测试（46 个用例）
+./scripts/run_api_tests.sh       # pytest 接口测试（15 个用例，夹具自动拉起服务）
+./scripts/release_check.sh       # 发布门禁：构建 + 单测 + 接口测试 + 故障注入 + 冒烟压测
+```
+
+单元测试覆盖 Buffer（含 readFd）、HttpParser（半包、粘包、pipelining、非法输入）、
+Router（404、目录穿越、405、Content-Type）、Metrics（直方图累计语义、分位、Prometheus 文本）、
+TimerQueue（一次性、取消、重复、回调内自取消）与 LogStream。
+
+接口测试覆盖 HTTP 行为（200/404/HEAD/keep-alive/目录穿越）与指标一致性
+（`myself_requests_total` 与压测请求数、4xx 分类、直方图累计语义、连接仪表）。
+
+## 性能与稳定性
+
+> 下表中的数字需要你在自己的机器上跑出来；命令与产物路径已经给出，不要把示例数字当结论。
+
+```bash
+./scripts/bench_matrix.sh 8080 "1 10 50 100 200 500" 30s   # 压测客户端请在宿主机执行
+sudo ./scripts/flamegraph.sh $(pgrep webserver) 30
+./scripts/soak_test.sh 4 8080 3600 30
+python3 scripts/fault_injection.py --port 8080 --idle-timeout 30
+```
+
+| 并发 | QPS | P99（毫秒） | 备注 |
+| --- | --- | --- | --- |
+| 1 | 待填 | 待填 | 单连接基线 |
+| 50 | 待填 | 待填 | |
+| 200 | 待填 | 待填 | 多核生效区间 |
+| 500 | 待填 | 待填 | 观察是否出现错误 |
+
+原始数据：`docs/bench/bench-matrix-*.csv`、火焰图 `docs/bench/flame-*.svg`、
+长稳采样 `docs/bench/soak-*.csv`（判据：RSS 增长小于 5%，错误数不增长）。
+
+故障注入结果（半包、粘包、慢连接、超长请求头、超长请求体、连接抖动 200 次）：
+见 `docs/stage-9-验收记录.md`，六个场景应全部 PASS。
+
+## 项目结构
+
+```
+MyselfWebServer/
+|-- CMakeLists.txt              顶层构建：myself_core 静态库 + webserver 可执行文件 + 可选测试
+|-- include/myself/
+|   |-- net/                    Socket、Acceptor、Buffer、Channel、Epoller、EventLoop、
+|   |                           EventLoopThread(Pool)、TcpConnection
+|   |-- http/                   HttpParser、HttpRequest、HttpResponse、Router
+|   |-- timer/                  Timer、TimerQueue
+|   |-- thread/                 ThreadPool（通用计算池）
+|   |-- log/                    LogStream、Logger、LogFile、AsyncLogging
+|   `-- util/                   Timestamp、Metrics、Version
+|-- src/                        与 include 对应的实现，main.cpp 只做装配
+|-- tests/unit                  GoogleTest 单元测试
+|-- tests/api                   pytest 接口测试
+|-- scripts/                    构建、测试、压测、火焰图、故障注入、发布门禁
+|-- docs/adr/                   设计决策记录（0001-0009）
+|-- docs/bench/                 压测与火焰图原始数据
+|-- www/                        静态资源
+`-- .github/workflows/ci.yml    持续集成
+```
 
 ## 设计决策
 
 - [ADR 0001：使用 CMake 与 C++17](docs/adr/0001-cmake-and-cpp17.md)
 - [ADR 0002：目录分层与依赖方向](docs/adr/0002-layered-directories.md)
+- [ADR 0003：主从 Reactor 与线程池](docs/adr/0003-main-sub-reactor.md)
+- [ADR 0004：定时器与空闲连接超时](docs/adr/0004-timer-design.md)
+- [ADR 0005：日志系统的前后端分离与异步落盘](docs/adr/0005-logging-design.md)
+- [ADR 0006：运行指标与 /metrics 接口](docs/adr/0006-metrics-design.md)
+- [ADR 0007：测试策略与持续集成](docs/adr/0007-testing-strategy.md)
+- [ADR 0008：性能验证与健壮性加固](docs/adr/0008-performance-and-robustness.md)
+- [ADR 0009：开源来源标注与许可证](docs/adr/0009-open-source-compliance.md)
 
-## 数据与结论
+## 与参考项目的差异
 
-压测数据、火焰图与优化对比记录在 `docs/bench/` 与对应的 ADR 中，
-所有数字均来自本机实测，并标注测试环境与完整命令。
+本项目在学习阶段阅读了 TinyWebServer 与 muduo 的代码，但核心模块自行实现，差异在于：
+
+1. 事件循环支持跨线程任务投递（eventfd 唤醒）与线程归属断言，便于定位跨线程错误；
+2. 定时器不依赖 timerfd，而是把最近到期时间交给 `epoll_wait`，实现更轻；
+3. 日志系统前后端分离，前端零分配格式化，后端异步双缓冲落盘；
+4. 自带 Prometheus 指标、过载保护与优雅退出，覆盖生产环境常见的可观测性需求；
+5. 提供完整的测试体系、压测矩阵、火焰图与故障注入脚本，数据可复现。
 
 ## 开发环境
 
 | 项 | 版本 |
 | --- | --- |
-| 操作系统 | Ubuntu 22.04 LTS |
-| 编译器 | GCC 11（C++17） |
-| 构建工具 | CMake 3.22、Make 或 Ninja |
-| 调试工具 | GDB、AddressSanitizer、Valgrind |
-| 压测工具 | wrk |
+| 操作系统 | Ubuntu 22.04 LTS（虚拟机） |
+| 编译器 | GCC 11，C++17 |
+| 构建工具 | CMake 3.22、Make/Ninja |
+| 测试 | GoogleTest、pytest、requests |
+| 压测与分析 | wrk、perf + FlameGraph、AddressSanitizer/TSan、Valgrind |
 
-## 来源与许可
+## 许可证与来源
 
-学习过程中参考了开源项目 TinyWebServer 与 muduo 的设计思路，核心模块自行实现。
-参考项目的许可证在其上游仓库中保留说明，使用前请自行核对。
+本项目采用 MIT 许可证，见 [LICENSE](LICENSE)。
 
-本项目采用 MIT 许可证（如与参考项目代码有衍生关系，请按上游许可证要求调整）。
+学习过程中参考了以下开源项目，仅参考设计思路，未复制其代码：
+TinyWebServer（qinguoyi/TinyWebServer）、muduo（chenshuo/muduo）。
+测试与工具链使用 GoogleTest、wrk、FlameGraph，均遵循其自身许可证。
+如后续引入其他第三方代码，会在本节与 `docs/adr/0009-open-source-compliance.md` 中补充声明。
 
 ## 联系
 
-GitHub：<https://github.com/WWB2006/MyselfWebServer>
-
-# MyselfWebServer 阶段 0 改名与阶段 1 落地
-
-本目录提供两样东西：把已生成的骨架改名为 MyselfWebServer 的命令，以及阶段 1 的三个源文件。
-
-## 一、把骨架改名为 MyselfWebServer
-
-命名约定：
-
-| 项 | 取值 |
-| --- | --- |
-| 仓库与目录名 | MyselfWebServer |
-| CMake project 名 | MyselfWebServer |
-| 可执行文件名 | MyselfWebServer（产物在 build/bin/） |
-| 核心静态库 | myself_core |
-| 命名空间 | myself |
-| 头文件目录 | include/myself/ |
-
-在项目上一级目录执行：
-
-```bash
-cd ~/code
-mv webserver MyselfWebServer
-cd MyselfWebServer
-
-# 1. 头文件目录改名
-mv include/webserver include/myself
-
-# 2. 修正 include 路径
-grep -rl 'webserver/' --include='*.cpp' --include='*.h' . \
-  | xargs sed -i 's|webserver/|myself/|g'
-
-# 3. 修正命名空间与版本常量
-grep -rl 'webserver' --include='*.cpp' --include='*.h' . \
-  | xargs sed -i 's/namespace webserver/namespace myself/g; s/webserver::/myself::/g'
-
-# 4. 修正 CMake 目标名与项目名
-sed -i 's/webserver_core/myself_core/g' CMakeLists.txt src/CMakeLists.txt tests/unit/CMakeLists.txt
-sed -i 's/project(webserver /project(MyselfWebServer /' CMakeLists.txt
-sed -i 's/add_executable(webserver /add_executable(MyselfWebServer /' src/CMakeLists.txt
-
-# 5. 修正脚本与编辑器配置里的产物路径
-grep -rl 'bin/webserver' --include='*.sh' --include='*.json' . \
-  | xargs sed -i 's|bin/webserver|bin/MyselfWebServer|g'
-
-# 6. 验证旧名字已经清理干净
-grep -rn 'webserver_core\|add_executable(webserver\|namespace webserver' . \
-  --include='*.txt' --include='*.cpp' --include='*.h' || echo "改名完成"
-
-# 7. 重新构建
-rm -rf build
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-./build/bin/MyselfWebServer -p 8080
-```
-
-README.md 的标题改成 MyselfWebServer，然后提交：
-
-```bash
-git add -A
-git commit -m "refactor: rename project to MyselfWebServer"
-```
-
-## 二、阶段 1：阻塞式 TCP 回显服务
-
-把本目录的文件放到工程对应位置（覆盖原有文件）：
-
-| 本目录文件 | 目标位置 |
-| --- | --- |
-| include/myself/net/Socket.h | include/myself/net/Socket.h |
-| src/net/Socket.cpp | src/net/Socket.cpp |
-| src/main.cpp | src/main.cpp |
-
-另外把 include/myself/util/Version.h、src/util/Version.cpp 里的命名空间改成 myself（如果第 3 步已经做过就跳过）。
-
-构建与验证：
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-./build/bin/MyselfWebServer -p 8080
-
-# 终端 2：正常回显
-nc 127.0.0.1 8080
-hello
-# 屏幕应回显 hello，按 Ctrl+C 退出
-```
-
-故意暴露的缺陷（写进 ADR，阶段 2 解决）：保持第一个 nc 连接不断开，再开一个终端执行 nc，第二个连接虽然能建立，
-但不会收到任何回显，因为服务端还阻塞在第一个连接里。
-
-提交：
-
-```bash
-git add -A
-git commit -m "feat: add blocking tcp echo server"
-```
-
-## 三、阶段 1 的验收标准
-
-1. 服务能启动并打印监听信息；
-2. nc 发送的内容会原样回显；
-3. 客户端断开后服务端继续处理下一个连接；
-4. 重启服务不会报 Address already in use（SO_REUSEADDR 生效）；
-5. 能解释“为什么单连接阻塞模型在第二个客户端上失效”，以及阶段 2 会怎么改。
-
-# MyselfWebServer 阶段 0 改名与阶段 1 落地
-
-本目录提供两样东西：把已生成的骨架改名为 MyselfWebServer 的命令，以及阶段 1 的三个源文件。
-
-## 一、把骨架改名为 MyselfWebServer
-
-命名约定：
-
-| 项 | 取值 |
-| --- | --- |
-| 仓库与目录名 | MyselfWebServer |
-| CMake project 名 | MyselfWebServer |
-| 可执行文件名 | MyselfWebServer（产物在 build/bin/） |
-| 核心静态库 | myself_core |
-| 命名空间 | myself |
-| 头文件目录 | include/myself/ |
-
-在项目上一级目录执行：
-
-```bash
-cd ~/code
-mv webserver MyselfWebServer
-cd MyselfWebServer
-
-# 1. 头文件目录改名
-mv include/webserver include/myself
-
-# 2. 修正 include 路径
-grep -rl 'webserver/' --include='*.cpp' --include='*.h' . \
-  | xargs sed -i 's|webserver/|myself/|g'
-
-# 3. 修正命名空间与版本常量
-grep -rl 'webserver' --include='*.cpp' --include='*.h' . \
-  | xargs sed -i 's/namespace webserver/namespace myself/g; s/webserver::/myself::/g'
-
-# 4. 修正 CMake 目标名与项目名
-sed -i 's/webserver_core/myself_core/g' CMakeLists.txt src/CMakeLists.txt tests/unit/CMakeLists.txt
-sed -i 's/project(webserver /project(MyselfWebServer /' CMakeLists.txt
-sed -i 's/add_executable(webserver /add_executable(MyselfWebServer /' src/CMakeLists.txt
-
-# 5. 修正脚本与编辑器配置里的产物路径
-grep -rl 'bin/webserver' --include='*.sh' --include='*.json' . \
-  | xargs sed -i 's|bin/webserver|bin/MyselfWebServer|g'
-
-# 6. 验证旧名字已经清理干净
-grep -rn 'webserver_core\|add_executable(webserver\|namespace webserver' . \
-  --include='*.txt' --include='*.cpp' --include='*.h' || echo "改名完成"
-
-# 7. 重新构建
-rm -rf build
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-./build/bin/MyselfWebServer -p 8080
-```
-
-README.md 的标题改成 MyselfWebServer，然后提交：
-
-```bash
-git add -A
-git commit -m "refactor: rename project to MyselfWebServer"
-```
-
-## 二、阶段 1：阻塞式 TCP 回显服务
-
-把本目录的文件放到工程对应位置（覆盖原有文件）：
-
-| 本目录文件 | 目标位置 |
-| --- | --- |
-| include/myself/net/Socket.h | include/myself/net/Socket.h |
-| src/net/Socket.cpp | src/net/Socket.cpp |
-| src/main.cpp | src/main.cpp |
-
-另外把 include/myself/util/Version.h、src/util/Version.cpp 里的命名空间改成 myself（如果第 3 步已经做过就跳过）。
-
-构建与验证：
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-./build/bin/MyselfWebServer -p 8080
-
-# 终端 2：正常回显
-nc 127.0.0.1 8080
-hello
-# 屏幕应回显 hello，按 Ctrl+C 退出
-```
-
-故意暴露的缺陷（写进 ADR，阶段 2 解决）：保持第一个 nc 连接不断开，再开一个终端执行 nc，第二个连接虽然能建立，
-但不会收到任何回显，因为服务端还阻塞在第一个连接里。
-
-提交：
-
-```bash
-git add -A
-git commit -m "feat: add blocking tcp echo server"
-```
-
-## 三、阶段 1 的验收标准
-
-1. 服务能启动并打印监听信息；
-2. nc 发送的内容会原样回显；
-3. 客户端断开后服务端继续处理下一个连接；
-4. 重启服务不会报 Address already in use（SO_REUSEADDR 生效）；
-5. 能解释“为什么单连接阻塞模型在第二个客户端上失效”，以及阶段 2 会怎么改。
-
-# MyselfWebServer 阶段 2：非阻塞 epoll 单线程 Reactor
-
-把阶段 1 的阻塞式单连接模型改成非阻塞 + epoll，一个线程同时服务多个连接。
-
-## 一、文件放置位置
-
-| 本目录文件 | 目标位置 |
-| --- | --- |
-| include/myself/net/Buffer.h | include/myself/net/Buffer.h |
-| include/myself/net/Epoller.h | include/myself/net/Epoller.h |
-| include/myself/net/Channel.h | include/myself/net/Channel.h |
-| include/myself/net/EventLoop.h | include/myself/net/EventLoop.h |
-| include/myself/net/TcpConnection.h | include/myself/net/TcpConnection.h |
-| include/myself/net/Acceptor.h | include/myself/net/Acceptor.h |
-| src/net/Buffer.cpp | src/net/Buffer.cpp |
-| src/net/Epoller.cpp | src/net/Epoller.cpp |
-| src/net/Channel.cpp | src/net/Channel.cpp |
-| src/net/EventLoop.cpp | src/net/EventLoop.cpp |
-| src/net/TcpConnection.cpp | src/net/TcpConnection.cpp |
-| src/net/Acceptor.cpp | src/net/Acceptor.cpp |
-| src/main.cpp | src/main.cpp（覆盖阶段 1 的版本） |
-
-`include/myself/net/Socket.h` 与 `src/net/Socket.cpp` 沿用阶段 1 的文件，不需要改动。
-新文件会被 `GLOB_RECURSE ... CONFIGURE_DEPENDS` 自动纳入构建，不用改 CMake。
-
-## 二、构建与验证
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-./build/bin/MyselfWebServer -p 8080
-```
-
-终端 2、3、4 分别打开一个连接，交替输入内容：
-
-```bash
-nc 127.0.0.1 8080      # 终端 2
-nc 127.0.0.1 8080      # 终端 3，阶段 1 会卡住，阶段 2 应该正常
-nc 127.0.0.1 8080      # 终端 4
-```
-
-期望现象：三个连接都能独立回显、互不阻塞；服务端打印每个连接的 accept、echo 与 close 日志。
-
-用 awk 直接做一次压力检查（可选）：
-
-```bash
-seq 1 200 | xargs -P 20 -I{} sh -c 'echo hello | nc -q1 127.0.0.1 8080 > /dev/null'
-ss -tn state established | wc -l      # 连接应全部正常关闭，无残留
-```
-
-## 三、代码结构说明
-
-| 文件 | 职责 | 关键点 |
-| --- | --- | --- |
-| Buffer | 线性缓冲区，读写指针 + 前移复用 | `readFd` 用 `readv` 一次读到 EAGAIN，避免多次系统调用 |
-| Epoller | epoll 的增删改与等待 | 只封装系统调用，不含业务逻辑 |
-| Channel | 一个 fd 关心的事件与回调 | `tie()` 锁住宿主生命周期，防止回调中对象被销毁 |
-| EventLoop | 等待事件并分发到 Channel | fd 到 Channel 的映射，支持运行中增删 |
-| TcpConnection | 一条连接的收发与关闭 | ET 模式循环读到 EAGAIN；写不完进输出缓冲并注册 EPOLLOUT |
-| Acceptor | 监听与 accept | `accept4(..., SOCK_NONBLOCK)`，循环取到 EAGAIN |
-| main.cpp | 装配：建循环、建 Acceptor、维护连接表 | 连接关闭时从连接表移除 |
-
-## 四、必须理解的四个点
-
-1. **ET 模式为什么要循环读**：一次事件只通知一次，如果不读到 EAGAIN，剩余数据要等下一次事件，可能永远等不到。
-2. **写不完怎么办**：`write` 返回值小于请求长度时必须把剩余数据存进输出缓冲区并注册 `EPOLLOUT`，否则数据静默丢失。
-3. **回调里对象被销毁的风险**：连接关闭回调会从连接表里删除自己，`Channel::tie()` 保证回调执行期间对象仍然存活。
-4. **为什么先取消关注再关闭 fd**：先 `disableAll()` + `remove()`，再从 epoll 里注销、最后 close，避免事件循环继续分发已关闭的 fd。
-
-## 五、验收标准
-
-1. 三个及以上客户端并发连接，回显互不阻塞；
-2. 客户端断开后服务端日志出现 close，连接表大小回到 0；
-3. `ss -tn state established` 在压测结束后没有残留连接；
-4. 用 `valgrind --leak-check=full ./build/bin/MyselfWebServer` 或 ASan 版本跑一轮无泄漏；
-5. 能回答：ET 与 LT 的区别、为什么用 `accept4` 而不是 `accept`、`tie()` 解决什么问题。
-
-## 六、提交
-
-```bash
-git add -A
-git commit -m "feat: add non-blocking epoll reactor with multi-connection echo"
-git push
-```
-
-# MyselfWebServer 阶段 3：HTTP 解析、静态文件与路由
-
-在阶段 2 的 Reactor 之上接入 HTTP：请求解析（状态机）、响应构造、静态文件服务与简单路由。
-
-## 一、文件放置位置
-
-| 本目录文件 | 目标位置 |
-| --- | --- |
-| include/myself/http/HttpRequest.h | include/myself/http/HttpRequest.h |
-| include/myself/http/HttpParser.h | include/myself/http/HttpParser.h |
-| include/myself/http/HttpResponse.h | include/myself/http/HttpResponse.h |
-| include/myself/http/Router.h | include/myself/http/Router.h |
-| src/http/HttpRequest.cpp | src/http/HttpRequest.cpp |
-| src/http/HttpParser.cpp | src/http/HttpParser.cpp |
-| src/http/HttpResponse.cpp | src/http/HttpResponse.cpp |
-| src/http/Router.cpp | src/http/Router.cpp |
-| src/main.cpp | src/main.cpp（覆盖阶段 2 的版本） |
-
-`www/index.html` 与 `www/404.html` 沿用阶段 0 生成的文件，可以直接被访问。
-
-## 二、构建与验证
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-./build/bin/MyselfWebServer -p 8080 -r www
-```
-
-终端 2 逐条验证：
-
-```bash
-# 1. 静态文件 200，且响应头带 Content-Length
-curl -i http://127.0.0.1:8080/index.html
-
-# 2. 根路径默认映射到首页
-curl -i http://127.0.0.1:8080/
-
-# 3. 不存在的路径返回 404
-curl -i http://127.0.0.1:8080/not-exist
-
-# 4. 长连接：两次请求复用同一条 TCP 连接
-curl -iv http://127.0.0.1:8080/index.html http://127.0.0.1:8080/index.html 2>&1 | grep -i "re-using\|connected"
-
-# 5. 路由接口
-curl -s http://127.0.0.1:8080/api/status
-
-# 6. 目录穿越被拒绝
-curl -i "http://127.0.0.1:8080/../etc/passwd"
-
-# 7. 半包与粘包：先发一半请求头，再发剩下的
-printf 'GET /index.html HTTP/1.1\r\nHost: 127.0.0.1\r' | nc 127.0.0.1 8080
-# 观察服务端不会误判为错误，补齐后半段后返回 200
-```
-
-服务端日志应出现 `[http] GET /index.html -> 200`、`[http] GET /not-exist -> 404` 这样的记录。
-
-## 三、代码结构说明
-
-| 文件 | 职责 | 关键点 |
-| --- | --- | --- |
-| HttpRequest | 保存解析结果：方法、路径、查询串、版本、头部、请求体 | 头部键统一转小写，查询大小写不敏感 |
-| HttpParser | 有限状态机：请求行 → 请求头 → 请求体 → 完成 | 只吃 Buffer，不碰 socket；半包返回 kNeedMore，粘包靠循环调用继续解析 |
-| HttpResponse | 状态行、头部、响应体的序列化 | 自动补 `Content-Length`、`Date`、`Connection`；HEAD 请求只发头部 |
-| Router | 路径到处理函数的映射，未命中按静态文件处理 | 默认路径映射到 index.html；拒绝 `..` 目录穿越；按扩展名给出 Content-Type |
-| main.cpp | 装配：每条连接一个解析器，循环解析后交给路由 | 支持 pipelining；短连接在响应后 `shutdownWrite()` |
-
-## 四、四个必须理解的点
-
-1. **半包**：请求行或请求头没读完时返回 `kNeedMore`，状态机保留中间状态，下次可读事件继续解析。
-2. **粘包 / pipelining**：一次 read 可能收到多条完整请求，所以解析用 `for (;;)` 循环，直到缓冲区里没有完整请求为止。
-3. **Content-Length 决定请求体长度**：解析头部时记录长度，请求体不足时继续等待；超过上限直接返回 400/413。
-4. **响应必须带 Content-Length**，否则浏览器或 curl 会一直等待连接结束。
-
-## 五、验收标准
-
-1. 浏览器打开 `http://虚拟机IP:8080/` 能看到首页；
-2. `curl -i` 访问不存在的路径返回 404，且响应头有 Content-Length；
-3. `/api/status` 返回 JSON；
-4. 半包与 pipelining 场景都能正确解析，服务端日志与预期一致；
-5. `curl` 连续两次访问复用同一条连接（长连接生效）；
-6. 目录穿越请求被拒绝。
-
-## 六、提交
-
-```bash
-git add include/myself/http src/http src/main.cpp
-git commit -m "feat: add http parser, static file service and router"
-git add docs/adr/0004-http状态机与半包处理.md
-git commit -m "docs: add adr for http parser state machine"
-git push
-```
-
-# 阶段 4：主从 Reactor 与线程池 —— 放置说明
-
-## 一、文件放置位置
-
-| 本目录文件 | 仓库中的位置 | 说明 |
-| --- | --- | --- |
-| include/myself/net/EventLoop.h | 同路径覆盖 | 增加跨线程投递与唤醒通道 |
-| src/net/EventLoop.cpp | 同路径覆盖 | 用 eventfd 唤醒，去掉临时调试打印 |
-| include/myself/net/EventLoopThread.h | 新增 | 一个线程 + 一个事件循环 |
-| src/net/EventLoopThread.cpp | 新增 | 线程内创建并运行 EventLoop |
-| include/myself/net/EventLoopThreadPool.h | 新增 | 主从 Reactor 的“从”部分 |
-| src/net/EventLoopThreadPool.cpp | 新增 | 轮询分配连接 |
-| include/myself/thread/ThreadPool.h | 新增 | 通用计算线程池 |
-| src/thread/ThreadPool.cpp | 新增 | 任务队列 + 条件变量 |
-| include/myself/net/TcpConnection.h | 同路径覆盖 | 只增加一个 `loop()` 访问器，用于退出时回到正确线程关闭连接 |
-| src/main.cpp | 同路径覆盖 | 主线程 accept，IO 线程读写，worker 线程处理耗时任务 |
-| CMakeLists.txt | 同路径覆盖 | 加入新源文件、去重 Version.cpp、链接 Threads |
-| docs/adr/0003-main-sub-reactor.md | docs/adr/ | 决策记录 |
-| docs/stage-4-验收记录.md | docs/ | 环境、命令、压测对比表 |
-
-## 二、构建与运行
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
-
-./build/webserver -t 0 -p 8080          # 单线程基线（阶段 3 行为）
-./build/webserver -t 4 -p 8080          # 4 个 IO 线程
-./build/webserver -t 4 -w 4 -p 8080     # 再加 4 个 worker 线程
-```
-
-功能验证：
-
-```bash
-curl -i http://127.0.0.1:8080/index.html
-curl -s http://127.0.0.1:8080/api/status      # 返回 ioThreads / workerThreads
-grep Threads /proc/$(pgrep webserver)/status  # 线程数核对
-```
-
-观察连接是否分散到多个 IO 线程：
-
-```bash
-for i in 1 2 3 4 5 6; do (nc 127.0.0.1 8080 &) ; done
-# 服务端日志里应出现 -> io-0、io-1、io-2、io-3 中的多个
-```
-
-## 三、压测对比（阶段 4 的核心产出）
-
-压测客户端一定要放在宿主机或另一台机器上，和服务器挤在同一台虚拟机会互相抢 CPU，
-数据没有说服力。
-
-```bash
-# 基线
-./build/webserver -t 0 -p 8080
-wrk -t4 -c200 -d60s --latency http://<虚拟机IP>:8080/index.html
-
-# 多 IO 线程
-./build/webserver -t 4 -p 8080
-wrk -t4 -c200 -d60s --latency http://<虚拟机IP>:8080/index.html
-
-# 多 IO 线程 + worker 池
-./build/webserver -t 4 -w 4 -p 8080
-wrk -t4 -c200 -d60s --latency http://<虚拟机IP>:8080/index.html
-```
-
-把三组数据填进 `docs/stage-4-验收记录.md` 的压测表，并写一句结论（提升多少、瓶颈在哪）。
-
-## 四、这一版代码的关键点
-
-1. **连接绑定 IO 线程**：连接对象在它所属的 IO 线程里创建、注册、读写与销毁；
-   跨线程注册事件会命中 `assertInLoopThread()` 直接终止，这是有意为之。
-2. **eventfd 唤醒**：`runInLoop` 从其他线程投递任务时写 8 字节，让 `epoll_wait` 立刻返回；
-   否则任务要等到下一次事件才执行。
-3. **线程归属断言**：`updateChannel` / `removeChannel` 只允许在循环线程调用，
-   把“偶发崩溃”变成“立即暴露”。
-4. **worker 线程不碰 socket**：worker 只做文件读取与响应构造，写回通过
-   `ioLoop->runInLoop` 回到 IO 线程，这是多线程服务器最容易写错的地方。
-5. **连接表加锁**：accept 在主线程插入、close 在 IO 线程删除，必须用互斥量保护。
-6. **CMake 必须链接 Threads**：漏掉会报 `undefined reference to pthread_create`。
-7. **退出顺序**：先 `registry.closeAll()` 把每条连接交回它所属的 IO 线程关闭，再回收线程池；
-   否则连接对象会在主线程析构，析构里调用 `disableAll()` 命中线程归属断言直接终止进程。
-8. **去掉了调试打印**：你原来的 `EventLoop.cpp` 里有 `[loop] waiting...`、`[dispatch]` 等临时输出，
-   这一版换成了按需的 `EventLoop::name()` 日志；需要重新排查时用线程名定位即可。
-9. **CMake 顺手清理**：原来的源文件列表里 `src/util/Version.cpp` 出现了三次，这一版去重了。
-
-## 五、本机无法编译，已做的人工自查
-
-我这边只有 Windows 工具链（没有 epoll/eventfd 头文件），所以**没有编译验证**，下面是逐项核对过的内容：
-
-| 检查项 | 结论 |
-| --- | --- |
-| 新增文件是否都写进 CMakeLists | 是，EventLoopThread、EventLoopThreadPool、ThreadPool 均已加入 |
-| 是否链接线程库 | 是，`find_package(Threads)` + `Threads::Threads` |
-| 头文件自洽 | EventLoop 增加 `<utility>`，EventLoopThreadPool.cpp 增加 `<utility>`，TcpConnection.h 增加 `<utility>` |
-| 跨线程访问 | 连接表加锁；socket 只在所属 IO 线程读写；worker 线程只做文件读取与响应构造 |
-| 退出路径 | registry.closeAll() → 各连接回到自己的 IO 线程关闭 → 线程池析构 quit + join |
-| 生命周期 | 连接创建、注册、关闭都通过 `runInLoop` 保证在同一线程；`Channel::tie` 保证回调期间对象存活 |
-
-如果编译报错，把完整报错贴给我；常见的第一批问题是：忘了把新文件加进 CMakeLists、
-漏链接 Threads、或者把 `send()` 直接写在了 worker 线程里。
-
-## 六、验收标准
-
-1. `-t 0` 与阶段 3 行为一致，`-t 4` 时连接分散到多个 IO 线程；
-2. `curl` 的 200 / 404 / `/api/status` 全部正常；
-3. 三组压测数据齐全，结论能解释瓶颈；
-4. ThreadSanitizer 或 helgrind 跑一轮无数据竞争报告；
-5. 压测结束后没有残留连接与 fd 泄漏；
-6. 能回答：为什么连接必须绑定固定的 IO 线程、eventfd 解决什么问题、worker 线程为什么不能直接 `send`。
-
-## 七、提交
-
-```bash
-git checkout -b stage4-threadpool
-git add CMakeLists.txt include src
-git commit -m "feat: 阶段4 主从 Reactor 与线程池"
-git add docs/adr/0003-main-sub-reactor.md docs/stage-4-验收记录.md
-git commit -m "docs: 阶段4 决策记录与验收记录"
-git push -u origin stage4-threadpool
-```
-
-## 八、README 需要同步的改动
-
-把阶段进度表里的阶段 4 一行改成：
-
-```
-| 4 | 线程池与主从 Reactor | 已完成 |
-```
-
-并在“设计决策”一节追加：
-
-```
-- [ADR 0003：主从 Reactor 与线程池](docs/adr/0003-main-sub-reactor.md)
-```
-
-# 阶段 5：定时器与空闲连接超时 —— 放置说明
-
-## 一、文件放置位置
-
-| 本目录文件 | 仓库中的位置 | 说明 |
-| --- | --- | --- |
-| include/myself/util/Timestamp.h | 新增 | 单调时钟封装与毫秒换算（header-only） |
-| include/myself/timer/Timer.h | 新增 | TimerId 句柄与 Timer 定义 |
-| src/timer/Timer.cpp | 新增 | 序号自增与重复定时器重排 |
-| include/myself/timer/TimerQueue.h | 新增 | 定时器队列（只在 loop 线程访问内部状态） |
-| src/timer/TimerQueue.cpp | 新增 | 插入、取消、最近到期时间与到期处理 |
-| include/myself/net/EventLoop.h | 同路径覆盖 | 增加 runAt/runAfter/runEvery/cancelTimer 与 TimerQueue 成员 |
-| src/net/EventLoop.cpp | 同路径覆盖 | 用最近到期时间作为 epoll_wait 超时；每轮处理到期定时器 |
-| include/myself/net/TcpConnection.h | 同路径覆盖 | 增加 setIdleTimeout 与空闲定时器成员 |
-| src/net/TcpConnection.cpp | 同路径覆盖 | 空闲计时刷新、超时关闭、关闭时取消定时器（并去掉你的调试打印） |
-| src/main.cpp | 同路径覆盖 | 新增 `-i` 参数、周期统计 runEvery、状态接口补充字段 |
-| CMakeLists.txt | 同路径覆盖 | 加入 timer 模块两个源文件 |
-| docs/adr/0004-timer-design.md | docs/adr/ | 决策记录 |
-| docs/stage-5-验收记录.md | docs/ | 环境、功能验收、精度与吞吐对比 |
-
-## 二、构建与运行
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-
-./build/webserver -t 4 -p 8080            # 不启用空闲超时
-./build/webserver -t 4 -i 5 -p 8080       # 空闲 5 秒断开
-```
-
-## 三、验证
-
-```bash
-# 1. 空闲超时：连上不输入，5 秒左右被服务端断开
-nc 127.0.0.1 8080
-# 服务端应打印：[timeout] fd=... idle over 5s, closing
-
-# 2. 有数据往来不误杀：每 2 秒发一行，持续 20 秒
-while true; do echo hello; sleep 2; done | nc 127.0.0.1 8080
-
-# 3. 周期任务：每 10 秒打印一次统计
-# [stats] online=..., timers=..., up=...s
-
-# 4. 状态接口
-curl -s http://127.0.0.1:8080/api/status
-
-# 5. 定时器取消：短连接请求后立即断开，等待超时时间，不应出现该 fd 的 [timeout]
-curl -s http://127.0.0.1:8080/index.html
-```
-
-## 四、这一版代码的关键点
-
-1. **定时精度来自 epoll_wait 超时**：`EventLoop::loop` 每轮向 `TimerQueue` 要"最近还有多少毫秒"，
-   没有定时器时返回 -1（一直阻塞），已经到期返回 0（立刻处理）。
-2. **时间用单调时钟**：`steady_clock` 不受系统时间调整影响；日志里用相对启动的毫秒数，便于阅读。
-3. **TimerQueue 不做内部加锁**：所有状态只在循环线程访问，跨线程调用通过 `runInLoop` 转发，
-   并借助阶段 4 的 eventfd 立即唤醒循环。
-4. **重复定时器先重排再执行**：这样回调里取消自己也能被正确移除，不会留下幽灵任务。
-5. **TimerId 带 owner 指针**：拿别的队列的句柄来取消会被忽略，避免误删同序号的其他任务。
-6. **空闲超时只持弱引用**：`weak_ptr` + 关闭时 `cancelTimer`，双保险避免回调访问已销毁的连接。
-7. **统计用原子变量**：定时器任务在 main 线程更新计数，`/api/status` 可能在任意 IO 线程读取，
-   所以用 `std::atomic<size_t>` 而不是普通变量。
-8. **去掉了调试打印**：`TcpConnection.cpp` 里原来的 `[handleRead] fd=... called` 已删除。
-
-## 五、验收标准
-
-1. `-i 5` 时空闲连接在 5 秒左右被断开，日志有 `[timeout]`；
-2. 有数据往来时不会被误杀，主动断开立即关闭；
-3. 关闭超时功能（不带 `-i`）时行为与阶段 4 一致；
-4. `/api/status` 返回 `idleTimeoutSeconds` 与 `timers` 字段；
-5. 每 10 秒输出一次 `[stats]`，说明 `runEvery` 可用；
-6. 压测数据与阶段 4 基线对比，QPS 下降在可解释范围内；
-7. 能回答：为什么用 epoll_wait 超时而不是 timerfd、TimerQueue 为什么不加锁、
-   重复定时器为什么先重排再执行。
-
-## 六、提交
-
-```bash
-git checkout -b stage5-timer
-git add CMakeLists.txt include src
-git commit -m "feat: 阶段5 定时器与空闲连接超时"
-git add docs/adr/0004-timer-design.md docs/stage-5-验收记录.md
-git commit -m "docs: 阶段5 决策记录与验收记录"
-git push -u origin stage5-timer
-```
-
-## 七、README 需要同步的改动
-
-阶段进度表：
-
-```
-| 5 | 定时器与空闲连接超时 | 已完成 |
-```
-
-设计决策一节追加：
-
-```
-- [ADR 0004：定时器与空闲连接超时](docs/adr/0004-timer-design.md)
-```
-
-# 阶段 6：日志系统 —— 放置说明
-
-## 一、文件放置位置
-
-| 本目录文件 | 仓库中的位置 | 说明 |
-| --- | --- | --- |
-| include/myself/log/LogStream.h、src/log/LogStream.cpp | 新增 | 栈上固定缓冲与类型输出，零分配 |
-| include/myself/log/Logger.h、src/log/Logger.cpp | 新增 | 级别、时间戳、线程 id、LOG_* 宏 |
-| include/myself/log/LogFile.h、src/log/LogFile.cpp | 新增 | 追加写文件，按大小与日期轮转 |
-| include/myself/log/AsyncLogging.h、src/log/AsyncLogging.cpp | 新增 | 后台线程 + 双缓冲，批量落盘 |
-| src/main.cpp | 同路径覆盖 | 日志初始化、`-l/-g/-s/-q` 参数、全部输出改为 LOG_* |
-| src/net/EventLoop.cpp | 同路径覆盖 | 线程归属断言改为 LOG_ERROR |
-| src/net/Epoller.cpp | 同路径覆盖 | 3 处错误改为 LOG_ERROR，去掉 add OK 调试打印 |
-| src/net/Acceptor.cpp | 同路径覆盖 | 监听与 accept 失败改为 LOG_INFO/LOG_ERROR |
-| src/net/EventLoopThreadPool.cpp | 同路径覆盖 | 线程池启动改为 LOG_INFO |
-| src/net/TcpConnection.cpp | 同路径覆盖 | 超时/读写错误改为 LOG_*，删掉 3 行 [start] 调试打印 |
-| src/thread/ThreadPool.cpp | 同路径覆盖 | 启动与任务异常改为 LOG_* |
-| CMakeLists.txt | 同路径覆盖 | 加入 log 模块 4 个源文件 |
-| docs/adr/0005-logging-design.md | docs/adr/ | 决策记录 |
-| docs/stage-6-验收记录.md | docs/ | 级别过滤、轮转、QPS 影响对比 |
-
-## 二、构建与运行
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-
-./build/webserver -t 4 -p 8080                          # 默认 info 级别，只输出控制台
-./build/webserver -t 4 -l warn -p 8080                  # 只保留告警与错误
-./build/webserver -t 4 -l info -g logs -s 32 -p 8080    # 异步落盘，按 32MB 轮转
-./build/webserver -t 4 -l info -g logs -q -p 8080       # 静默：只写文件
-```
-
-## 三、验证
-
-```bash
-# 1. 日志格式（时间 线程id 级别 内容 文件:行号）
-./build/webserver -t 2 -p 8080
-# 20260926 20:15:03.123456 [INFO ] acceptor listening on port 8080 - Acceptor.cpp:33
-
-# 2. 级别过滤
-./build/webserver -l warn -p 8080     # 正常请求不再打印
-./build/webserver -l debug -p 8080    # 能看到 epoll add 这类 DEBUG
-
-# 3. 异步落盘与轮转
-./build/webserver -g logs -s 1 -p 8080 &
-ls -lh logs/                          # 出现 server.<时间>.<pid>.log
-wrk -t4 -c200 -d60s http://127.0.0.1:8080/index.html
-ls logs/ | wc -l                      # 超过 1MB 后文件数量增加
-
-# 4. 静默模式对比 QPS
-./build/webserver -l info -g logs -q -p 8080
-wrk -t4 -c200 -d60s --latency http://127.0.0.1:8080/index.html
-```
-
-## 四、这一版代码的关键点
-
-1. **前端/后端分离**：`Logger` 只格式化，输出目标由函数指针决定，因此控制台、异步文件、
-   测试用内存缓冲可以互换。
-2. **零分配格式化**：`FixedBuffer` 在栈上，整数用除法逐位写出，避免每条日志一次 `std::string`。
-3. **宏里先判级别**：`if (Logger::level() <= kInfo)` 保证低于阈值的日志连拼接都不发生。
-4. **异步双缓冲**：前端写满一块就交给后端，后端批量写文件并归还缓冲，避免频繁 write 与锁竞争。
-5. **按大小与日期轮转**：单文件超过 `-s` 指定大小立刻换文件，同时保证每天至少一个文件。
-6. **时间基准分开**：日志用 `CLOCK_REALTIME`（人能对上时间），定时器用 `steady_clock`（单调）。
-7. **清理调试打印**：删掉了 `TcpConnection::start()` 里的 3 行 `[start]` 与 `Epoller::add` 的
-   `add OK` 打印，改为 DEBUG 级日志。
-
-## 五、验收标准
-
-1. 四种级别过滤都生效，格式统一且带线程 id；
-2. `-g` 时日志写入文件，`-s 1` 能观察到轮转；
-3. `-q` 时控制台无输出但文件仍在写；
-4. 压测数据完整：warn/info/debug 与控制台开关四组对比；
-5. 多线程下日志不交错、不丢行；
-6. 能回答：为什么要前后端分离、异步日志丢日志的窗口有多大、宏里先判级别省掉了什么。
-
-## 六、提交
-
-```bash
-git checkout -b stage6-logging
-git add CMakeLists.txt include src
-git commit -m "feat: 阶段6 分级日志与异步落盘"
-git add docs/adr/0005-logging-design.md docs/stage-6-验收记录.md
-git commit -m "docs: 阶段6 决策记录与验收记录"
-git push -u origin stage6-logging
-```
-
-## 七、README 需要同步的改动
-
-阶段进度表：
-
-```
-| 6 | 日志系统 | 已完成 |
-```
-
-设计决策一节追加：
-
-```
-- [ADR 0005：日志系统的前后端分离与异步落盘](docs/adr/0005-logging-design.md)
-```
-
-# 阶段 7：运行指标与 /metrics 接口 —— 放置说明
-
-## 一、文件放置位置
-
-| 本目录文件 | 仓库中的位置 | 说明 |
-| --- | --- | --- |
-| include/myself/util/Metrics.h、src/util/Metrics.cpp | 新增 | 原子计数器 + 固定桶直方图 + Prometheus 文本渲染 |
-| include/myself/util/Timestamp.h | 同路径覆盖 | 新增 `msBetween()`，用于测量请求延迟 |
-| include/myself/log/Logger.h、src/log/Logger.cpp | 同路径覆盖 | 新增日志行计数 `Logger::lineCount()` |
-| src/net/TcpConnection.cpp | 同路径覆盖 | 上报读写字节数与 socket 错误 |
-| src/main.cpp | 同路径覆盖 | 安装指标、上报连接与请求、新增 `/metrics`、扩展 `/api/status` |
-| CMakeLists.txt | 同路径覆盖 | 加入 `src/util/Metrics.cpp` |
-| docs/adr/0006-metrics-design.md | docs/adr/ | 决策记录 |
-| docs/stage-7-验收记录.md | docs/ | 一致性核对与开销测量 |
-| docs/adr/0005-logging-design.md | docs/adr/ | **补交**：你仓库里缺的阶段 6 ADR，单独拷进去即可（不包含在补丁里） |
-
-## 二、构建与运行
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-./build/webserver -t 4 -l info -g logs -p 8080
-```
-
-## 三、验证
-
-```bash
-# 1. Prometheus 文本格式
-curl -s http://127.0.0.1:8080/metrics | head -25
-curl -sI http://127.0.0.1:8080/metrics | grep -i content-type
-
-# 2. JSON 摘要
-curl -s http://127.0.0.1:8080/api/status
-
-# 3. 计数器与压测结果核对
-curl -s http://127.0.0.1:8080/metrics | grep myself_requests_total
-wrk -t4 -c200 -d60s --latency http://<虚拟机IP>:8080/index.html
-curl -s http://127.0.0.1:8080/metrics | grep -E "myself_requests_total|latency_ms_count|latency_ms_quantile"
-
-# 4. 状态码分类：连续请求不存在的路径
-for i in $(seq 1 10); do curl -s -o /dev/null http://127.0.0.1:8080/not-exist; done
-curl -s http://127.0.0.1:8080/metrics | grep 'class="4xx"'
-
-# 5. 连接数是否回落
-curl -s http://127.0.0.1:8080/api/status | grep -o '"connections":{[^}]*}'
-```
-
-## 四、这一版代码的关键点
-
-1. **固定桶直方图**：12 个毫秒上界加一档 `+Inf`，内存恒定；分位由桶内插值估算，
-   精确值交给 Prometheus 的 `histogram_quantile()`。
-2. **全原子更新**：任意 IO 线程与 worker 线程都能上报，快照在调用线程内拼装，没有全局锁。
-3. **全局注册表加便捷函数**：`Metrics::install()` 之后 net 层直接调用 `metrics::error()` 这类函数；
-   未安装时是空操作，方便单元测试。
-4. **依赖方向保持干净**：`util` 不依赖 `log`，日志行数由 `main` 作为参数传给渲染函数。
-5. **延迟口径**：从解析出完整请求到响应写入完成，包含 worker 池排队与计算时间，接近用户感知的延迟。
-6. **命名规范**：`myself_` 前缀、单位后缀（`_ms`、`_seconds`）、`_total` 计数器，符合 Prometheus 习惯。
-
-## 五、验收标准
-
-1. `/metrics` 输出可被 Prometheus 解析（有 HELP/TYPE，值类型正确）；
-2. `/api/status` 含连接、请求、错误、字节、延迟分位、日志行数、运行时长；
-3. 压测后 `myself_requests_total` 与 wrk 报告的成功请求数接近，差值能解释；
-4. 404 请求计入 `4xx`，`HEAD` 计入对应方法分类；
-5. 压测结束后 `connections.current` 回落到 0，`max` 保留峰值；
-6. 开启指标带来的 QPS 下降在 5% 以内（若超出，用火焰图定位）。
-
-## 六、提交
-
-```bash
-git checkout -b stage7-metrics
-git add CMakeLists.txt include src
-git commit -m "feat: 阶段7 运行指标与 /metrics 接口"
-git add docs
-git commit -m "docs: 阶段7 决策记录与验收记录（含补交的 ADR 0005）"
-git push -u origin stage7-metrics
-```
-
-## 七、README 需要同步的改动
-
-阶段进度表：
-
-```
-| 7 | 运行指标与 /metrics 接口 | 已完成 |
-```
-
-设计决策一节追加：
-
-```
-- [ADR 0005：日志系统的前后端分离与异步落盘](docs/adr/0005-logging-design.md)
-- [ADR 0006：运行指标与 /metrics 接口](docs/adr/0006-metrics-design.md)
-```
-
-# 阶段 8：测试体系与持续集成 —— 放置说明
-
-## 一、文件放置位置
-
-| 本目录文件 | 仓库中的位置 | 说明 |
-| --- | --- | --- |
-| CMakeLists.txt | 同路径覆盖 | 拆出 `myself_core` 静态库；可执行文件与测试分别链接；新增 `WEBSERVER_BUILD_TESTS` 开关 |
-| src/util/Metrics.cpp | 同路径覆盖 | **修复**：Prometheus 直方图桶改为累计语义（阶段 7 的 bug） |
-| tests/unit/CMakeLists.txt | 新增 | 优先系统 GTest，缺失时 FetchContent；注册 ctest |
-| tests/unit/test_buffer.cpp | 新增 | Buffer 单元测试（含用 pipe 测 readFd） |
-| tests/unit/test_http_parser.cpp | 新增 | 半包、粘包、pipelining、请求体、长连接、非法输入 |
-| tests/unit/test_router.cpp | 新增 | 静态文件、404、目录穿越、405、Content-Type |
-| tests/unit/test_metrics.cpp | 新增 | 计数、直方图累计语义、分位、Prometheus 文本、reset、空操作 |
-| tests/unit/test_timer_queue.cpp | 新增 | 一次性、取消、重复、回调内自取消、nextTimeoutMs |
-| tests/unit/test_log_stream.cpp | 新增 | 类型格式化、null、reset |
-| tests/api/conftest.py | 新增 | 启动真实服务二进制并等待端口就绪的夹具 |
-| tests/api/test_http_basic.py | 新增 | HTTP 行为用例 |
-| tests/api/test_metrics.py | 新增 | 指标格式与一致性用例 |
-| tests/api/requirements.txt | 新增 | pytest 与 requests |
-| tests/api/pytest.ini | 新增 | pytest 配置 |
-| scripts/run_unit_tests.sh | 新增 | 一条命令跑单元测试 |
-| scripts/run_api_tests.sh | 新增 | 一条命令跑接口测试（自动建虚拟环境） |
-| .github/workflows/ci.yml | 新增 | GitHub Actions：构建 + 单元测试 + 接口测试 |
-| docs/adr/0007-testing-strategy.md | docs/adr/ | 决策记录 |
-| docs/stage-8-验收记录.md | docs/ | 用例清单、覆盖率、CI 与修复记录 |
-
-## 二、本地运行
-
-```bash
-# 单元测试（46 个用例）
-./scripts/run_unit_tests.sh
-
-# 接口测试（15 个用例，夹具自动拉起服务）
-./scripts/run_api_tests.sh
-
-# 只跑某一个用例
-ctest --test-dir build -R BufferTest --output-on-failure
-pytest tests/api -k metrics -v
-```
-
-离线环境（没有网络下载 GoogleTest）先执行：
-
-```bash
-sudo apt install -y libgtest-dev
-```
-
-CMake 会优先用系统包，不会再去下载。
-
-## 三、持续集成
-
-把 `.github/workflows/ci.yml` 提交后，push 与 PR 会自动执行：配置 → 构建 → `ctest` → `pytest`，
-失败时上传 `logs/` 作为 artifact。
-
-README 里可以加构建徽章（把用户名与仓库名替换掉）：
-
-```markdown
-![ci](https://github.com/<user>/MyselfWebServer/actions/workflows/ci.yml/badge.svg)
-```
-
-## 四、这一版代码的关键点
-
-1. **拆出 `myself_core` 静态库**：测试要能链接业务代码，就不能把一切塞进可执行文件；
-   可执行文件只剩 `main.cpp`。
-2. **测试框架双通道**：`find_package(GTest)` 命中就用系统包（离线可用），否则 FetchContent 下载，
-   CI 与本地都能跑。
-3. **接口测试用真实进程**：夹具用 `subprocess` 启动二进制、轮询端口就绪、结束时 terminate，
-   这样 epoll、多线程与关闭路径都在覆盖范围内。
-4. **测试即文档**：`test_http_parser.cpp` 里的半包与 pipelining 用例，直接说明了协议实现的行为约定。
-5. **顺手修掉一个真实 bug**：阶段 7 的 Prometheus 桶计数是各档独立计数，而 Prometheus 约定
-   `le` 是累计语义，`histogram_quantile()` 会算错；现在渲染时累加，并加了两个用例锁定行为。
-6. **性能不进 CI**：runner 性能抖动大，性能回归放在固定机器上做（阶段 9），CI 只保证功能正确。
-
-## 五、验收标准
-
-1. `./scripts/run_unit_tests.sh` 全绿，用例数不少于 40；
-2. `./scripts/run_api_tests.sh` 全绿；
-3. 故意改坏一处逻辑（例如把 `Content-Length` 去掉）时，能有用例失败；
-4. GitHub Actions 在 push 后自动跑完两个测试步骤；
-5. 覆盖率（若统计）总体不低于 60%；
-6. 能回答：为什么拆静态库、为什么接口测试不用进程内调用、为什么性能测试不放在 CI 里。
-
-## 六、提交
-
-```bash
-git checkout -b stage8-tests-ci
-git add CMakeLists.txt tests scripts .github src/util/Metrics.cpp
-git commit -m "test: 阶段8 单元测试、接口测试与 CI"
-git add docs
-git commit -m "docs: 阶段8 决策记录与验收记录"
-git push -u origin stage8-tests-ci
-```
-
-## 七、README 需要同步的改动
-
-阶段进度表：
-
-```
-| 8 | 测试体系与持续集成 | 已完成 |
-```
-
-新增一节“测试”：
-
-```markdown
-## 测试
-
-![ci](https://github.com/<user>/MyselfWebServer/actions/workflows/ci.yml/badge.svg)
-
-- 单元测试：`./scripts/run_unit_tests.sh`（46 个用例，覆盖 Buffer、HTTP 解析、路由、指标、定时器、日志）
-- 接口测试：`./scripts/run_api_tests.sh`（15 个用例，启动真实二进制验证 HTTP 行为与指标一致性）
-```
-
-# 阶段 9：性能与健壮性 —— 放置说明
-
-## 一、文件放置位置
-
-| 本目录文件 | 仓库中的位置 | 说明 |
-| --- | --- | --- |
-| src/main.cpp | 同路径覆盖 | 新增 `-m` 过载保护与 SIGINT/SIGTERM 优雅退出 |
-| include/myself/util/Metrics.h、src/util/Metrics.cpp | 同路径覆盖 | 新增 `connections_rejected` 计数与同名 Prometheus 指标 |
-| include/myself/http/HttpResponse.h、src/http/HttpResponse.cpp | 同路径覆盖 | 新增 `serviceUnavailable()`（503） |
-| scripts/bench_matrix.sh | 新增 | 并发梯度压测，结果写 CSV |
-| scripts/soak_test.sh | 新增 | 长稳采样（RSS、在线连接、请求数、错误数） |
-| scripts/flamegraph.sh | 新增 | perf 采样加 FlameGraph 生成 SVG |
-| scripts/fault_injection.py | 新增 | 六类故障注入用例，输出 PASS/FAIL |
-| docs/bench/README.md | 新增 | 数据目录规范与字段说明 |
-| docs/adr/0008-performance-and-robustness.md | docs/adr/ | 决策记录 |
-| docs/stage-9-验收记录.md | docs/ | 压测矩阵、故障注入、长稳与退出验证表 |
-| .gitignore | 同路径覆盖 | 忽略 `.pytest_cache/`、`third_party/`、perf 原始数据 |
-
-## 二、构建与运行
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
-./build/webserver -t 4 -m 512 -i 30 -l warn -q -g logs -p 8080
-```
-
-| 参数 | 作用 |
-| --- | --- |
-| `-m 512` | 最大并发连接数，超出返回 503 并计数（0 表示不限制） |
-| `-i 30` | 空闲连接 30 秒断开（故障注入的慢连接用例需要它） |
-| Ctrl+C | 优雅退出：日志出现 `shutdown requested`，连接与日志正常收尾 |
-
-## 三、四项验证
-
-```bash
-# 1. 压测矩阵（客户端在宿主机执行）
-./scripts/bench_matrix.sh 8080 "1 10 50 100 200 500" 30s
-
-# 2. 火焰图（需要 perf 权限）
-sudo ./scripts/flamegraph.sh $(pgrep webserver) 30
-
-# 3. 故障注入（服务端要带 -i 参数）
-python3 scripts/fault_injection.py --port 8080 --idle-timeout 30
-
-# 4. 长稳采样（先跑 1 小时，正式数据建议 24 小时）
-./scripts/soak_test.sh 4 8080 3600 30
-```
-
-## 四、这一版代码的关键点
-
-1. **过载保护给出明确结果**：超过 `-m` 的连接立刻收到 503 并关闭，而不是让客户端等到超时；
-   同时累加 `myself_connections_rejected_total`，压测时能定量说明拒绝了多少。
-2. **信号处理只做一件事**：SIGINT/SIGTERM 只设置原子标志（异步信号安全），
-   真正的收尾放在事件循环的 200ms 定时任务里。
-3. **退出顺序**：停下事件循环 → 把连接交回各自的 IO 线程关闭 → 停工作线程池 → 刷日志 →
-   停异步日志线程，保证日志不丢、连接不残。
-4. **压测方法学**：客户端与服务端分离、并发梯度、每条数据带环境注释，
-   避免出现"数字很好看但无法复现"的情况。
-5. **数据归档**：CSV 与火焰图进 `docs/bench/`，README 只引用文件与结论。
-
-## 五、验收标准
-
-1. 六类故障注入全部 PASS（慢连接用例需服务端启用 `-i`）；
-2. 压测矩阵至少 5 档并发，QPS 与 P99 完整，能说清瓶颈在哪；
-3. 有火焰图或替代性的热点分析证据；
-4. `-m 8` 时并发 20 条连接，超出部分收到 503，拒绝计数同步增加；
-5. 压测中 Ctrl+C 能优雅退出，日志完整，`ss -tn state established | wc -l` 回落；
-6. 长稳采样至少 1 小时，RSS 增长不超过 5%。
-
-## 六、提交
-
-```bash
-git checkout -b stage9-performance
-git add include src scripts docs .gitignore
-git commit -m "perf: 阶段9 压测矩阵、火焰图、故障注入与过载保护"
-git push -u origin stage9-performance
-```
-
-## 七、README 需要同步的改动
-
-阶段进度表：
-
-```
-| 9 | 性能与健壮性 | 已完成 |
-```
-
-“数据与结论”一节替换为：
-
-```markdown
-## 数据与结论
-
-- 压测矩阵：`docs/bench/bench-matrix-*.csv`（并发 1 到 500，含 QPS 与 P99）
-- 火焰图：`docs/bench/flame-*.svg`
-- 长稳采样：`docs/bench/soak-*.csv`（RSS 增长小于 5%，错误数不增长）
-- 故障注入：半包、粘包、慢连接、超长头/体、连接抖动全部通过
-- 过载保护：`-m` 生效时返回 503，`myself_connections_rejected_total` 可观测
-```
-
+GitHub：<https://github.com/your-name/MyselfWebServer>（替换为你的仓库地址）

@@ -107,7 +107,7 @@ TEST(MetricsTest, EstimatesQuantilesFromBuckets) {
     const myself::Metrics::Snapshot snapshot = metrics.snapshot();
 
     EXPECT_LE(snapshot.latencyP50Ms, 10.0);
-    EXPECT_GE(snapshot.latencyP99Ms, 10.0);
+    EXPECT_GT(snapshot.latencyP99Ms, 10.0);
     EXPECT_LE(snapshot.latencyP99Ms, 10000.0);
 }
 

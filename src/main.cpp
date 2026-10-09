@@ -1,5 +1,6 @@
-// 阶段 5：在主从 Reactor 之上加入定时器。
-// 空闲连接超时、周期性统计都通过 EventLoop 的定时器接口实现。
+// 阶段 9：性能与健壮性加固。
+// 新增 -m 过载保护（连接数超限返回 503）与 SIGINT/SIGTERM 优雅退出，
+// 指标侧补充连接拒绝计数，供压测矩阵与故障注入脚本核对。
 
 #include <unistd.h>
 
@@ -167,13 +168,9 @@ public:
         connections_[fd] = conn;
     }
 
-    /// 只在这个 fd 当前对应的连接就是 conn 时才移除，避免 fd 复用后误删新连接。
-    void removeIfMatch(int fd, const std::shared_ptr<myself::TcpConnection>& conn) {
+    void remove(int fd) {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = connections_.find(fd);
-        if (it != connections_.end() && it->second == conn) {
-            connections_.erase(it);
-        }
+        connections_.erase(fd);
     }
 
     size_t size() const {
@@ -434,7 +431,7 @@ int main(int argc, char* argv[]) {
                         LOG_INFO << "close fd=" << fd << " peer=" << c->peerIp() << ":"
                                  << c->peerPort();
                         myself::metrics::connectionClosed();
-                        registry.removeIfMatch(fd, c);
+                        registry.remove(fd);
                     });
 
                 registry.add(fd, conn);

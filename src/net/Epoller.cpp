@@ -1,4 +1,3 @@
-
 #include "myself/net/Epoller.h"
 
 #include <unistd.h>
@@ -31,10 +30,11 @@ bool Epoller::add(Channel* channel) {
     event.data.fd = channel->fd();
     event.events = channel->events();
     if (::epoll_ctl(epollFd_, EPOLL_CTL_ADD, channel->fd(), &event) < 0) {
-        LOG_ERROR << "epoller add fd=" << channel->fd()
-                  << " failed: " << std::strerror(errno);
+        LOG_ERROR << "epoll add failed fd=" << channel->fd()
+                  << " error=" << std::strerror(errno);
         return false;
     }
+    LOG_DEBUG << "epoll add fd=" << channel->fd() << " events=" << event.events;
     return true;
 }
 
@@ -43,8 +43,8 @@ bool Epoller::modify(Channel* channel) {
     event.data.fd = channel->fd();
     event.events = channel->events();
     if (::epoll_ctl(epollFd_, EPOLL_CTL_MOD, channel->fd(), &event) < 0) {
-        LOG_ERROR << "epoller modify fd=" << channel->fd()
-                  << " failed: " << std::strerror(errno);
+        LOG_ERROR << "epoll modify failed fd=" << channel->fd()
+                  << " error=" << std::strerror(errno);
         return false;
     }
     return true;
@@ -52,8 +52,8 @@ bool Epoller::modify(Channel* channel) {
 
 bool Epoller::remove(Channel* channel) {
     if (::epoll_ctl(epollFd_, EPOLL_CTL_DEL, channel->fd(), nullptr) < 0) {
-        LOG_ERROR << "epoller remove fd=" << channel->fd()
-                  << " failed: " << std::strerror(errno);
+        LOG_ERROR << "epoll remove failed fd=" << channel->fd()
+                  << " error=" << std::strerror(errno);
         return false;
     }
     return true;
@@ -63,7 +63,7 @@ int Epoller::wait(int timeoutMs) {
     const int count = ::epoll_wait(epollFd_, events_.data(),
                                    static_cast<int>(events_.size()), timeoutMs);
     if (count < 0 && errno != EINTR) {
-        LOG_ERROR << "epoller wait failed: " << std::strerror(errno);
+        LOG_ERROR << "epoll_wait failed: " << std::strerror(errno);
     }
     return count;
 }

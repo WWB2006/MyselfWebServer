@@ -20,20 +20,6 @@ if ! command -v wrk >/dev/null 2>&1; then
     exit 1
 fi
 
-# 把 wrk 的延迟值（可能带 us/ms/s/k 后缀）统一转成毫秒。
-# wrk 对小值有时会输出 "2.49k"（实际是 2.49ms 的格式化问题），按 ms 处理。
-to_ms() {
-    local raw="$1"
-    local num="${raw%%[a-zA-Z]*}"      # ← %% 删最长字母后缀（us）
-    local unit="${raw#"$num"}"
-    case "$unit" in
-        us) awk -v v="$num" 'BEGIN{printf "%.3f", v/1000}' ;;
-        ms|"") echo "$num" ;;
-        s) awk -v v="$num" 'BEGIN{printf "%.3f", v*1000}' ;;
-        k) echo "$num" ;;
-        *) echo "$num" ;;
-    esac
-}
 mkdir -p docs/bench
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="docs/bench/bench-matrix-${STAMP}.csv"
@@ -46,21 +32,13 @@ OUT="docs/bench/bench-matrix-${STAMP}.csv"
 
 for CONCURRENCY in $CONCURRENCY_LIST; do
     echo "==> 并发 ${CONCURRENCY}"
-    # 并发小于线程数时用并发数当线程数，否则 wrk 报 "connections must be >= threads"
-    T=$THREADS
-    if [ "$CONCURRENCY" -lt "$THREADS" ]; then
-        T=$CONCURRENCY
-    fi
-
     RAW="$(mktemp)"
-    wrk -t"$T" -c"${CONCURRENCY}" -d"${DURATION}" --latency \
+    wrk -t"${THREADS}" -c"${CONCURRENCY}" -d"${DURATION}" --latency \
         "http://${HOST}:${PORT}${PATH_UNDER_TEST}" | tee "$RAW"
 
     QPS="$(awk '/Requests\/sec/{print $2}' "$RAW" | head -1)"
-    P50_RAW="$(awk '/50%/{print $2}' "$RAW" | head -1)"
-    P99_RAW="$(awk '/99%/{print $2}' "$RAW" | head -1)"
-    P50="$(to_ms "${P50_RAW:-0}")"
-    P99="$(to_ms "${P99_RAW:-0}")"
+    P50="$(awk '/50%/{print $2}' "$RAW" | head -1)"
+    P99="$(awk '/99%/{print $2}' "$RAW" | head -1)"
     REQUESTS="$(awk '/[0-9]+ requests in/{print $1}' "$RAW" | head -1)"
     ERRORS="$(awk '/Socket errors/{print $0}' "$RAW" | head -1)"
     ERRORS="${ERRORS:-none}"

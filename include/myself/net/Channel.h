@@ -16,8 +16,11 @@ class Channel {
 public:
     using EventCallback = std::function<void()>;
 
-    static constexpr uint32_t kReadEvent = EPOLLIN | EPOLLPRI;
-    static constexpr uint32_t kWriteEvent = EPOLLOUT;
+    // 边缘触发（EPOLLET）：一次事件只上报一次，读/写回调必须一直处理到返回 EAGAIN。
+    // 读侧见 TcpConnection::handleRead 与 Acceptor::handleRead，
+    // 写侧见 TcpConnection::handleWrite，唤醒通道见 EventLoop::handleWakeup。
+    static constexpr uint32_t kReadEvent = EPOLLIN | EPOLLPRI | EPOLLET;
+    static constexpr uint32_t kWriteEvent = EPOLLOUT | EPOLLET;
 
     Channel(EventLoop* loop, int fd);
     ~Channel();
@@ -81,4 +84,3 @@ private:
 };
 
 }  // namespace myself
-

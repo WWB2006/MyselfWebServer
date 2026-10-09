@@ -16,5 +16,6 @@ build-cov/
 third_party/
 docs/bench/perf-*.data
 docs/bench/perf-*.script
-docs/bench/perf-*.folded
-stage/
+
+# Office 临时锁文件（打开 docx/xlsx 时会生成，~$ 前缀），不进仓库
+~$*

@@ -24,8 +24,11 @@ def read_response(sock: socket.socket, timeout: float = 5.0) -> bytes:
         if not data:
             break
         chunks.append(data)
-        if b"\r\n\r\n" in b"".join(chunks) and len(chunks) > 0:
-            # 头部已收齐，简单起见再读一小会
+        # 头部已收齐就收工。"\r\n\r\n" 可能跨 chunk 边界，所以对已收到的内容整体判断。
+        # 这里不需要再判 chunks 是否为空：能走到这一步说明刚 append 过一段非空 data。
+        received = b"".join(chunks)
+        if b"\r\n\r\n" in received:
+            # 简单起见再读一小会，把可能已在途的响应体一并取回
             time.sleep(0.05)
             try:
                 more = sock.recv(65536)
@@ -93,20 +96,18 @@ def scenario_oversized_body(host: str, port: int) -> bool:
     line = status_line(response)
     return "400" in line or "413" in line or line == "<空响应>"
 
+
 def scenario_connection_churn(host: str, port: int, rounds: int = 200) -> bool:
     """连接抖动：快速建立并断开，服务应存活且不泄漏 fd。"""
     for _ in range(rounds):
-        try:
-            with socket.create_connection((host, port), timeout=5) as sock:
-                sock.sendall(b"GET /api/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-                read_response(sock, timeout=2.0)
-        except (ConnectionResetError, BrokenPipeError):
-            # 快速连断时对端可能发 RST，属于预期现象
-            continue
+        with socket.create_connection((host, port), timeout=5) as sock:
+            sock.sendall(b"GET /api/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            read_response(sock, timeout=2.0)
     # 还能正常服务即视为通过
     with socket.create_connection((host, port), timeout=5) as sock:
         sock.sendall(b"GET /api/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         return b"200" in read_response(sock)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="MyselfWebServer 故障注入用例")

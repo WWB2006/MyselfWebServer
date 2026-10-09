@@ -162,19 +162,28 @@ void TcpConnection::handleWrite() {
         return;
     }
 
-    const ssize_t n = ::write(socket_.fd(), output_.peek(), output_.readableBytes());
-    if (n > 0) {
-        myself::metrics::bytesWritten(static_cast<size_t>(n));
-        output_.retrieve(static_cast<size_t>(n));
-        if (output_.readableBytes() == 0) {
-            channel_.disableWriting();
+    // ET 模式：一次可写事件必须把输出缓冲尽量写空，否则不会再收到 EPOLLOUT
+    for (;;) {
+        const ssize_t n = ::write(socket_.fd(), output_.peek(), output_.readableBytes());
+        if (n > 0) {
+            myself::metrics::bytesWritten(static_cast<size_t>(n));
+            output_.retrieve(static_cast<size_t>(n));
+            if (output_.readableBytes() == 0) {
+                channel_.disableWriting();
+                return;
+            }
+            continue;
         }
-        return;
-    }
-    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;  // 内核发送缓冲已满，等下一次可写事件
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
         LOG_ERROR << "conn write failed: " << std::strerror(errno);
         myself::metrics::error();
         handleClose();
+        return;
     }
 }
 

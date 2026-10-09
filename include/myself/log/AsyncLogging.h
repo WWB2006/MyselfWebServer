@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -31,6 +32,7 @@ public:
     void stop();
 
     /// 线程安全：可在任意业务线程调用。
+    /// 只把当前缓冲移交给后台线程，真正的落盘由后台线程完成。
     void append(const char* data, size_t len);
     void flush();
 
@@ -40,7 +42,8 @@ private:
     std::string baseName_;
     size_t rollSize_;
     double flushIntervalSeconds_;
-    bool running_{false};
+    // 后台线程在锁外读取，必须用原子量，否则是数据竞争
+    std::atomic<bool> running_{false};
     std::thread thread_;
     std::mutex mutex_;
     std::condition_variable cv_;
