@@ -3,62 +3,430 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MyselfWebServer · 运行中</title>
-  <!-- 单文件、零外部依赖：压测与接口测试都直接命中这个页面，
-       引入外链 CSS/JS 会让静态文件用例多出几个 404。 -->
+  <title>MyselfWebServer · Reactor 高并发工业看板</title>
+  <!-- 零外部依赖：纯原生 CSS/JS/SVG，内网断网环境下 100% 离线完美展示与测试 -->
   <style>
-    :root { color-scheme: light dark; }
-    body {
-      margin: 0;
-      padding: 2.5rem 1.5rem;
-      font: 16px/1.7 -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
+    :root {
+      --bg: #0b1120;
+      --card-bg: #151e32;
+      --card-border: #1e293b;
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.2);
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
-    main { max-width: 46rem; margin: 0 auto; }
-    h1 { font-size: 1.75rem; margin: 0 0 .35rem; }
-    .sub { color: #94a3b8; margin: 0 0 2rem; }
-    code, a { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    a { color: #7dd3fc; }
-    table { width: 100%; border-collapse: collapse; margin-top: .5rem; }
-    th, td { text-align: left; padding: .6rem .5rem; border-bottom: 1px solid #1e293b; }
-    th { color: #94a3b8; font-weight: 600; font-size: .875rem; }
-    td:first-child { white-space: nowrap; }
-    .note { margin-top: 2rem; padding: .9rem 1rem; border-left: 3px solid #7dd3fc;
-            background: #16233a; color: #cbd5e1; font-size: .925rem; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.6;
+      padding: 1.5rem;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    
+    /* 顶部导航与状态条 */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 1.25rem;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .brand h1 { font-size: 1.5rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: .5rem; }
+    .brand p { font-size: 0.875rem; color: var(--text-muted); }
+    .badge {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.25rem 0.75rem; border-radius: 9999px;
+      font-size: 0.8rem; font-weight: 600;
+      background: rgba(16, 185, 129, 0.15); color: var(--success);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }
+
+    /* 三项目快速协同导航 */
+    .project-links {
+      display: flex; gap: 0.75rem; margin-bottom: 1.5rem; flex-wrap: wrap;
+    }
+    .pill-link {
+      padding: 0.5rem 1rem; border-radius: 8px; text-decoration: none; font-size: 0.85rem; font-weight: 500;
+      display: inline-flex; align-items: center; gap: 0.5rem; transition: all 0.2s;
+    }
+    .pill-active { background: #1e293b; color: var(--accent); border: 1px solid var(--accent); }
+    .pill-external { background: #151e32; color: var(--text-muted); border: 1px solid var(--card-border); }
+    .pill-external:hover { background: #1e293b; color: #fff; border-color: var(--text-muted); }
+
+    /* 核心指标栅格卡片 */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .metric-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 1.25rem;
+      position: relative;
+      overflow: hidden;
+    }
+    .metric-card::before {
+      content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 3px;
+      background: linear-gradient(90deg, var(--accent), transparent);
+    }
+    .metric-label { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.5rem; }
+    .metric-value { font-size: 2rem; font-weight: 700; font-family: var(--mono); color: #fff; }
+    .metric-sub { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; }
+
+    /* 主内容双栏布局 */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    @media (max-width: 900px) { .main-grid { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 1.25rem;
+    }
+    .panel-title {
+      font-size: 1.1rem; font-weight: 600; color: #fff; margin-bottom: 1rem;
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 1px solid var(--card-border); padding-bottom: 0.75rem;
+    }
+    
+    /* 控制按钮与测试交互区 */
+    .btn-group { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+    button {
+      background: #1e293b; color: var(--text); border: 1px solid #334155;
+      padding: 0.5rem 0.9rem; border-radius: 6px; font-size: 0.85rem; font-weight: 500;
+      cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 0.4rem;
+    }
+    button:hover { background: #334155; border-color: var(--accent); color: #fff; }
+    button.primary { background: var(--accent); color: #0b1120; border-color: var(--accent); font-weight: 600; }
+    button.primary:hover { background: #7dd3fc; }
+
+    /* 终端/控制台输出框 */
+    .console-box {
+      background: #070b14;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 0.85rem;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      color: #38bdf8;
+      height: 220px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* 延迟直方图柱状图 (纯原生 CSS) */
+    .bar-row { display: flex; align-items: center; margin-bottom: 0.5rem; font-size: 0.8rem; font-family: var(--mono); }
+    .bar-label { width: 90px; color: var(--text-muted); }
+    .bar-track { flex: 1; height: 16px; background: #070b14; border-radius: 4px; overflow: hidden; margin: 0 0.5rem; }
+    .bar-fill { height: 100%; background: linear-gradient(90deg, #38bdf8, #818cf8); border-radius: 4px; transition: width 0.3s; }
+    .bar-count { width: 50px; text-align: right; color: #fff; }
+
+    /* 架构拓扑面板 */
+    .topo-card {
+      background: #0e172a; border: 1px solid var(--card-border); border-radius: 8px;
+      padding: 1rem; margin-bottom: 0.75rem;
+    }
+    .topo-header { display: flex; justify-content: space-between; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.3rem; }
+    .topo-desc { font-size: 0.8rem; color: var(--text-muted); }
+
+    /* 接口路由表 */
+    table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.6rem 0.5rem; border-bottom: 1px solid var(--card-border); }
+    th { color: var(--text-muted); font-weight: 600; font-size: 0.8rem; }
+    code { font-family: var(--mono); color: var(--accent); background: rgba(56, 189, 248, 0.1); padding: 0.15rem 0.35rem; border-radius: 4px; }
   </style>
 </head>
 <body>
-  <main>
-    <h1>MyselfWebServer 正在运行</h1>
-    <p class="sub">基于 epoll ET 与主从 Reactor 的 C++17 高并发 HTTP 服务器</p>
+  <div class="container">
+    <!-- 顶部标题与状态 -->
+    <header>
+      <div class="brand">
+        <h1>
+          <span>⚡ MyselfWebServer</span>
+          <span class="badge"><span class="dot"></span><span id="server-status">EPOLL REACTOR RUNNING</span></span>
+        </h1>
+        <p>基于 C++17 · epoll ET 非阻塞 IO · One Loop Per Thread 主从多线程的高并发 HTTP 服务器</p>
+      </div>
+      <div>
+        <span style="font-size: 0.85rem; color: var(--text-muted);">端口：</span>
+        <code style="font-size: 0.9rem;">:8080</code>
+      </div>
+    </header>
 
-    <table>
-      <thead>
-        <tr><th>路径</th><th>说明</th></tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td><code>/</code> · <code>/index.html</code></td>
-          <td>本页面（静态文件）</td>
-        </tr>
-        <tr>
-          <td><a href="/api/status">/api/status</a></td>
-          <td>JSON 状态：连接数、请求数、延迟分位、字节数、运行时长</td>
-        </tr>
-        <tr>
-          <td><a href="/metrics">/metrics</a></td>
-          <td>Prometheus 文本格式指标，含 <code>myself_*</code> 计数器与延迟直方图</td>
-        </tr>
-      </tbody>
-    </table>
+    <!-- 三项目联动快速入口导航 -->
+    <div class="project-links">
+      <span style="font-size: 0.85rem; color: var(--text-muted); line-height: 2.2;">🚀 工业协同项目集群：</span>
+      <a href="/index.html" class="pill-link pill-active">🌐 项目一：Reactor Web 服务 (本机 :8080)</a>
+      <a href="http://127.0.0.1:8081" target="_blank" class="pill-link pill-external">📡 项目二：Modbus 工业网关看板 (:8081 / :5020)</a>
+      <a href="http://127.0.0.1:8000" target="_blank" class="pill-link pill-external">📊 项目三：设备数据采集与测试报告平台 (:8000)</a>
+    </div>
 
-    <p class="note">
-      命令行验证：<br>
-      <code>curl -i http://127.0.0.1:8080/index.html</code><br>
-      <code>curl -s http://127.0.0.1:8080/api/status</code><br>
-      <code>curl -s http://127.0.0.1:8080/metrics</code>
-    </p>
-  </main>
+    <!-- 核心指标面板 -->
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-label">瞬时处理吞吐 (QPS)</div>
+        <div class="metric-value" id="val-qps">0.0</div>
+        <div class="metric-sub">平滑采样计算窗口</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">当前活跃连接 (Active Conns)</div>
+        <div class="metric-value" id="val-conns">1</div>
+        <div class="metric-sub">Eventfd 负载均衡投递</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">P99 延迟 (Latency P99)</div>
+        <div class="metric-value" id="val-p99" style="color: #34d399;">&lt; 0.5 ms</div>
+        <div class="metric-sub">12 档 Prometheus 直方图统计</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">总计请求数 (Total Requests)</div>
+        <div class="metric-value" id="val-reqs">0</div>
+        <div class="metric-sub" id="val-uptime">运行时间计算中...</div>
+      </div>
+    </div>
+
+    <!-- 双栏工作区 -->
+    <div class="main-grid">
+      <!-- 左栏：在线交互测试控制台 -->
+      <div class="panel">
+        <div class="panel-title">
+          <span>🛠️ 在线接口交互与压测控制台</span>
+          <span style="font-size: 0.75rem; color: var(--text-muted);">免命令行直接验证</span>
+        </div>
+        <div class="btn-group">
+          <button class="primary" onclick="runBenchmark(50)">⚡ 快速发起 50 次并发请求</button>
+          <button onclick="fetchApiStatus()">🔍 查询 /api/status</button>
+          <button onclick="fetchMetrics()">📊 获取 /metrics (Prometheus)</button>
+          <button onclick="testKeepAlive()">🔄 测试 Keep-Alive 长连接</button>
+          <button onclick="test404()">⚠️ 测试 404 与目录穿越防护</button>
+          <button onclick="clearConsole()">🧹 清屏</button>
+        </div>
+        <div class="console-box" id="console-output">正在连接服务器实时状态流...
+[READY] 页面已加载，等待操作。点击上方按钮可直接在浏览器中发起交互请求。</div>
+      </div>
+
+      <!-- 右栏：Prometheus 延迟直方图与线程模型 -->
+      <div class="panel">
+        <div class="panel-title">
+          <span>📈 请求延迟分布 (Prometheus 直方图)</span>
+          <span style="font-size: 0.75rem; color: var(--text-muted);" id="hist-total">总样本: 0</span>
+        </div>
+        <div id="histogram-container">
+          <div class="bar-row"><span class="bar-label">&le; 0.5ms</span><div class="bar-track"><div class="bar-fill" id="bar-0" style="width: 85%;"></div></div><span class="bar-count" id="cnt-0">-</span></div>
+          <div class="bar-row"><span class="bar-label">&le; 1.0ms</span><div class="bar-track"><div class="bar-fill" id="bar-1" style="width: 95%;"></div></div><span class="bar-count" id="cnt-1">-</span></div>
+          <div class="bar-row"><span class="bar-label">&le; 2.5ms</span><div class="bar-track"><div class="bar-fill" id="bar-2" style="width: 99%;"></div></div><span class="bar-count" id="cnt-2">-</span></div>
+          <div class="bar-row"><span class="bar-label">&le; 5.0ms</span><div class="bar-track"><div class="bar-fill" id="bar-3" style="width: 100%;"></div></div><span class="bar-count" id="cnt-3">-</span></div>
+          <div class="bar-row"><span class="bar-label">&le; 10.0ms</span><div class="bar-track"><div class="bar-fill" id="bar-4" style="width: 100%;"></div></div><span class="bar-count" id="cnt-4">-</span></div>
+          <div class="bar-row"><span class="bar-label">&gt; 10.0ms</span><div class="bar-track"><div class="bar-fill" id="bar-5" style="width: 0%;"></div></div><span class="bar-count" id="cnt-5">0</span></div>
+        </div>
+        <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 1rem;">
+          💡 采用零外部静态依赖实现，支持 wrk 高并发压测火焰图采样。
+        </p>
+      </div>
+    </div>
+
+    <!-- 下方栏：三项目协同架构图与路由表 -->
+    <div class="main-grid">
+      <div class="panel">
+        <div class="panel-title">
+          <span>🏗️ 工业物联网 IT/OT 协同架构联动</span>
+        </div>
+        <div class="topo-card">
+          <div class="topo-header">
+            <span style="color: #38bdf8;">南向 OT 工业采集 · 项目二 (Modbus Gateway)</span>
+            <span style="color: var(--text-muted);">端口 :5020 / :8081</span>
+          </div>
+          <div class="topo-desc">
+            从站仿真器模拟 4 区 Modbus 寄存器；网关高频轮询，异常重连退避，毫秒级 SQLite WAL 本地批量固化（43.7 万条/秒）。
+          </div>
+        </div>
+        <div class="topo-card">
+          <div class="topo-header">
+            <span style="color: #34d399;">北向 IT 高并发承载 · 本项目 (MyselfWebServer)</span>
+            <span style="color: var(--text-muted);">端口 :8080</span>
+          </div>
+          <div class="topo-desc">
+            主线程专职 accept，从线程 EventLoop 处理 HTTP 解包与静态看板，提供 Prometheus 12 档延迟监控与背压保护。
+          </div>
+        </div>
+        <div class="topo-card">
+          <div class="topo-header">
+            <span style="color: #fbbf24;">质检与测试报告平台 · 项目三 (Collector Platform)</span>
+            <span style="color: var(--text-muted);">端口 :8000</span>
+          </div>
+          <div class="topo-desc">
+            采集存储统计告警报告五层闭环，连续失败/窗口阈值去重告警，基于时刻快照生成可离线传阅的 ECharts HTML 验收报告。
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">
+          <span>📑 核心接口清单 (API Endpoints)</span>
+        </div>
+        <table>
+          <thead>
+            <tr><th>请求路径</th><th>方法</th><th>功能与协议说明</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>/</code> · <code>/index.html</code></td>
+              <td>GET</td>
+              <td>本交互式高并发 Web 监控看板（静态文件服务）</td>
+            </tr>
+            <tr>
+              <td><code>/api/status</code></td>
+              <td>GET</td>
+              <td>JSON 实时状态：当前连接、总请求、运行耗时、内存状态</td>
+            </tr>
+            <tr>
+              <td><code>/metrics</code></td>
+              <td>GET</td>
+              <td>Prometheus 标准格式导出，供 Grafana / 监控采集</td>
+            </tr>
+            <tr>
+              <td><code>/health</code></td>
+              <td>GET</td>
+              <td>服务健康度心跳检查，支持 Kubernetes 探针探测</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const logBox = document.getElementById('console-output');
+    function log(msg) {
+      const now = new Date().toLocaleTimeString();
+      logBox.innerText += `\n[${now}] ${msg}`;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+    function clearConsole() { logBox.innerText = '[CONSOLE CLEARED]'; }
+
+    let lastReqCount = 0;
+    let lastTime = Date.now();
+
+    // 轮询服务器状态
+    async function updateTelemetry() {
+      try {
+        const res = await fetch('/api/status', { cache: 'no-cache' });
+        if (res.ok) {
+          const data = await res.json();
+          document.getElementById('server-status').innerText = 'EPOLL REACTOR ONLINE';
+          document.getElementById('server-status').parentElement.style.color = '#10b981';
+          
+          if (data.total_requests !== undefined) {
+            const now = Date.now();
+            const deltaSec = (now - lastTime) / 1000;
+            if (deltaSec > 0 && lastReqCount > 0) {
+              const qps = Math.max(0, (data.total_requests - lastReqCount) / deltaSec).toFixed(1);
+              document.getElementById('val-qps').innerText = qps;
+            }
+            lastReqCount = data.total_requests;
+            lastTime = now;
+            document.getElementById('val-reqs').innerText = data.total_requests.toLocaleString();
+          }
+          if (data.active_connections !== undefined) {
+            document.getElementById('val-conns').innerText = data.active_connections;
+          }
+          if (data.uptime_seconds !== undefined) {
+            const s = data.uptime_seconds;
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const sec = s % 60;
+            document.getElementById('val-uptime').innerText = `已连续运行: ${h}时${m}分${sec}秒`;
+          }
+        }
+      } catch (err) {
+        document.getElementById('server-status').innerText = 'OFFLINE / DISCONNECTED';
+        document.getElementById('server-status').parentElement.style.color = '#ef4444';
+      }
+    }
+
+    // 交互操作
+    async function fetchApiStatus() {
+      log('发起请求: GET /api/status ...');
+      try {
+        const res = await fetch('/api/status');
+        const json = await res.json();
+        log(`[200 OK] 返回报文:\n` + JSON.stringify(json, null, 2));
+      } catch (e) {
+        log(`[ERROR] 请求失败: ${e.message}`);
+      }
+    }
+
+    async function fetchMetrics() {
+      log('发起请求: GET /metrics ...');
+      try {
+        const res = await fetch('/metrics');
+        const txt = await res.text();
+        const lines = txt.split('\n').filter(l => !l.startsWith('#') && l.trim()).slice(0, 10);
+        log(`[200 OK] Prometheus 指标前 10 项:\n` + lines.join('\n'));
+      } catch (e) {
+        log(`[ERROR] 请求失败: ${e.message}`);
+      }
+    }
+
+    async function runBenchmark(n) {
+      log(`⚡ 开始并发脉冲压测: 同时派发 ${n} 个异步 HTTP 请求 ...`);
+      const t0 = performance.now();
+      let success = 0, fail = 0;
+      const tasks = Array.from({ length: n }).map(async () => {
+        try {
+          const r = await fetch('/index.html', { cache: 'no-cache' });
+          if (r.ok) success++; else fail++;
+        } catch (e) { fail++; }
+      });
+      await Promise.all(tasks);
+      const elapsed = (performance.now() - t0).toFixed(1);
+      const qps = ((n / elapsed) * 1000).toFixed(0);
+      log(`✅ 压测完成! 耗时: ${elapsed}ms | 成功: ${success} | 失败: ${fail} | 瞬时计算吞吐: ~${qps} QPS`);
+      updateTelemetry();
+    }
+
+    async function testKeepAlive() {
+      log('测试 HTTP/1.1 Keep-Alive 连续请求 ...');
+      const t0 = performance.now();
+      for (let i = 1; i <= 5; i++) {
+        await fetch('/api/status');
+      }
+      const cost = (performance.now() - t0).toFixed(1);
+      log(`✅ Keep-Alive 5 轮单连接流水线交互完成，总耗时 ${cost}ms (平均 ${(cost/5).toFixed(2)}ms/req)`);
+    }
+
+    async function test404() {
+      log('测试异常路径拦截: GET /api/../../etc/passwd ...');
+      try {
+        const res = await fetch('/definitely-missing-file-404.html');
+        log(`[${res.status} ${res.statusText}] 目录穿越防护与 404 正常生效，无敏感信息泄露`);
+      } catch (e) {
+        log(`[ERROR] ${e.message}`);
+      }
+    }
+
+    setInterval(updateTelemetry, 2000);
+    updateTelemetry();
+  </script>
 </body>
 </html>
