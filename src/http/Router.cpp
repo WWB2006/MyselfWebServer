@@ -11,7 +11,6 @@
 #include <ctime>
 #include <fstream>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -317,13 +316,22 @@ HttpResponse Router::serveStaticFile(const std::string& path,
                              lastModified);
     }
 
-    std::ifstream file(fullPath, std::ios::binary);
-    if (!file) {
-        return HttpResponse::notFound();
+    // 按 stat 拿到的长度一次性分配再 read，而不是 ostringstream << rdbuf()：
+    // libstdc++ 的 operator<<(streambuf*) 是 1KB 小块 sgetn 循环 + 末尾再整包 str() 拷贝，
+    // 200MB 文件实测只有 60MB/s 量级；一次性 read 只要一次分配 + 一次系统调用。
+    std::string body(static_cast<size_t>(info.st_size), '\0');
+    if (!body.empty()) {
+        std::ifstream file(fullPath, std::ios::binary);
+        if (!file) {
+            return HttpResponse::notFound();
+        }
+        file.read(&body[0], static_cast<std::streamsize>(body.size()));
+        const std::streamsize got = file.gcount();
+        if (got < static_cast<std::streamsize>(body.size())) {
+            // 读取途中文件被截断：按实际读到的长度回，避免多吐垃圾字节
+            body.resize(got > 0 ? static_cast<size_t>(got) : 0u);
+        }
     }
-
-    std::ostringstream content;
-    content << file.rdbuf();
 
     HttpResponse response;
     response.setStatus(200, "OK");
@@ -331,7 +339,7 @@ HttpResponse Router::serveStaticFile(const std::string& path,
     response.setHeader("ETag", etag);
     response.setHeader("Last-Modified", lastModified);
     response.setHeader("Cache-Control", "no-cache");
-    response.setBody(content.str());
+    response.setBody(std::move(body));
     return response;
 }
 

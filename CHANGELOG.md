@@ -26,6 +26,9 @@
 
 - `HttpResponse` 支持文件体（`setFileBody` / `hasFileBody`），序列化时文件体不占 `body_`，
   `Content-Length` 由调用方显式设置
+- 静态文件读取改为「按 `stat` 长度一次性分配 + 一次 `read`」，替换
+  `ostringstream << rdbuf()`：后者是 1KB 小块 `sgetn` 循环再整包 `str()` 拷贝，
+  200MB 文件实测只有 60MB/s 量级，与零拷贝的对照组失真
 
 ## [1.2.0] - 2026-10-21
 

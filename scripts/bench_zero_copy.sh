@@ -31,6 +31,8 @@ trap cleanup EXIT
 echo "生成 ${SIZE_MB}MB 测试文件：$ASSET"
 dd if=/dev/zero of="$ASSET" bs=1M count="$SIZE_MB" status=none
 ls -lh "$ASSET" | awk '{print "  实际大小：" $5}'
+echo "注意：第 1 次下载通常包含冷页缓存/冷启动，看第 2、3 次的稳定值；"
+echo "     若两种模式都卡在同一个数字，说明瓶颈不在拷贝（多半是网络或客户端）。"
 
 run_case() {
     local label="$1" threshold="$2"
