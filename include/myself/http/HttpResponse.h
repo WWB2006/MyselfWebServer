@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cctype>
 #include <map>
 #include <string>
 
@@ -19,6 +21,24 @@ public:
 
     void setHeader(const std::string& key, const std::string& value) {
         headers_[key] = value;
+    }
+    /// 读取响应头（键大小写不敏感）；未设置时返回空串。
+    std::string header(const std::string& key) const {
+        const auto it = headers_.find(key);
+        if (it != headers_.end()) {
+            return it->second;
+        }
+        for (const auto& item : headers_) {
+            if (item.first.size() == key.size() &&
+                std::equal(item.first.begin(), item.first.end(), key.begin(),
+                           [](char a, char b) {
+                               return std::tolower(static_cast<unsigned char>(a)) ==
+                                      std::tolower(static_cast<unsigned char>(b));
+                           })) {
+                return item.second;
+            }
+        }
+        return std::string();
     }
     void setContentType(const std::string& type) { setHeader("Content-Type", type); }
     void setBody(std::string body) { body_ = std::move(body); }

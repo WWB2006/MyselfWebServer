@@ -11,6 +11,7 @@
 namespace myself {
 
 /// 路由：把路径映射到处理函数，未命中的路径按静态文件处理。
+/// 静态文件响应带强 ETag 与 Last-Modified，并处理条件请求（命中返回 304）。
 class Router {
 public:
     using Handler = std::function<HttpResponse(const HttpRequest&)>;
@@ -28,7 +29,8 @@ public:
     static std::string contentTypeFor(const std::string& path);
 
 private:
-    HttpResponse serveStaticFile(const std::string& path) const;
+    /// 读取静态文件；request 只用于取 If-None-Match / If-Modified-Since
+    HttpResponse serveStaticFile(const std::string& path, const HttpRequest& request) const;
     static bool isPathSafe(const std::string& path);
 
     std::string wwwRoot_;

@@ -2,6 +2,28 @@
 
 本文件按阶段记录可见变化。日期取自仓库提交记录，阶段内的多条提交合并为一条里程碑。
 
+## [1.2.0] - 2026-10-21
+
+HTTP 条件请求与协商缓存 (Conditional GET / ETag / 304 Not Modified)。
+
+### Added
+
+- 静态文件响应新增强校验器 `ETag`（`"mtime-size"` 十六进制）与 `Last-Modified`（IMF-fixdate），
+  由一次 `stat(2)` 得到，不额外读取文件内容
+- 条件请求裁决：支持 `If-None-Match`（强/弱比较、逗号列表、`*` 通配）与 `If-Modified-Since`，
+  命中返回零 Body 的 `304 Not Modified`；按 RFC 9110 §13.1.3 让 `If-None-Match` 优先
+- `Cache-Control: no-cache`：允许缓存但每次使用前重新校验
+- 手写 HTTP 日期解析（IMF-fixdate / RFC 850 / asctime），不依赖 `strptime` 与 locale
+- 指标扩展：Prometheus 新增 `myself_requests_not_modified_total`，`/api/status` 暴露 `requests.notModified`
+- 自动化测试：新增 9 项 Router 单元测试（校验器、304、弱/列表/通配、优先级、指纹失效、目录）
+  与 6 项接口测试 `tests/api/test_conditional_get.py`
+- `docs/stage-11-ETag与条件请求.md`：设计依据、实现细节、验证方式、已知边界与面试问答
+
+### Fixed
+
+- 静态资源路径改用 `stat` + `S_ISREG` 判断存在性：此前用 `ifstream` 打开目录也会成功，
+  导致请求子目录返回 `200` + 空响应体，现在返回 `404`
+
 ## [1.1.0] - 2026-10-20
 
 自适应令牌桶限流与应用层过载保护 (Rate Limiting & Overload Protection)。

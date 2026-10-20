@@ -14,11 +14,20 @@
 4. 接入 Prometheus 指标与过载保护：暴露 12 档延迟直方图与连接/请求/拒绝计数，
    连接数超过上限时立即返回 503；并用压测矩阵与火焰图定位瓶颈。
    证据：`/metrics` 输出、`docs/bench/` 数据、ADR 0006、ADR 0008。
+5. 实现 L7 自适应令牌桶限流（惰性补发、突发容量、`429` + `Retry-After`、运维接口白名单），
+   并修复短连接下提前 `shutdown(SHUT_WR)` 触发 `EPIPE` 与 TCP RST 的时序缺陷（改为输出缓冲
+   drain 后延迟半关闭）；压测中精准拦截 16032 次超额请求且零崩溃。
+   证据：`include/myself/util/TokenBucket.h`、`docs/stage-10-令牌桶限流与过载保护.md`。
+6. 实现 HTTP 条件请求（RFC 9110 §13）：用一次 `stat(2)` 生成强 `ETag` 与 `Last-Modified`，
+   支持 `If-None-Match`（强/弱/列表/`*`）与 `If-Modified-Since`，命中返回零 Body 的
+   `304 Not Modified`，并暴露 `myself_requests_not_modified_total` 统计省下的整包传输。
+   证据：`src/http/Router.cpp`、`docs/stage-11-ETag与条件请求.md`。
 
 ## 二、简历条目（测试/测试开发版）
 
-1. 为该 HTTP 服务器搭建两层自动化测试：GoogleTest 单元测试 46 个用例（协议解析、缓冲区、
-   路由、指标、定时器）与 pytest 接口测试 15 个用例（HTTP 行为与指标一致性）。
+1. 为该 HTTP 服务器搭建两层自动化测试：GoogleTest 单元测试 61 个用例（协议解析、缓冲区、
+   路由与条件请求、指标、定时器、令牌桶）与 pytest 接口测试 23 个用例（HTTP 行为、
+   限流反压与指标一致性）。
    证据：`tests/`、GitHub Actions 运行记录。
 2. 编写故障注入脚本覆盖半包、粘包、慢连接、超长请求头/体与连接抖动六类场景，
    全部可复现并通过。证据：`scripts/fault_injection.py` 输出、阶段 9 验收记录。

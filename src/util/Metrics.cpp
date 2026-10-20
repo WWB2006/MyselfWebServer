@@ -50,6 +50,10 @@ void Metrics::onRequestRateLimited() {
     requestsRateLimited_.fetch_add(1);
 }
 
+void Metrics::onRequestNotModified() {
+    requestsNotModified_.fetch_add(1);
+}
+
 void Metrics::onRequestStarted(MethodKind kind) {
     if (kind >= 0 && kind < kMethodCount) {
         methodCounts_[kind].fetch_add(1);
@@ -98,6 +102,7 @@ void Metrics::reset() {
     connectionsMax_.store(0);
     requestsTotal_.store(0);
     requestsRateLimited_.store(0);
+    requestsNotModified_.store(0);
     errorsTotal_.store(0);
     bytesReadTotal_.store(0);
     bytesWrittenTotal_.store(0);
@@ -152,6 +157,7 @@ Metrics::Snapshot Metrics::snapshot() const {
     result.connectionsMax = connectionsMax_.load();
     result.requestsTotal = requestsTotal_.load();
     result.requestsRateLimited = requestsRateLimited_.load();
+    result.requestsNotModified = requestsNotModified_.load();
     result.errorsTotal = errorsTotal_.load();
     result.bytesReadTotal = bytesReadTotal_.load();
     result.bytesWrittenTotal = bytesWrittenTotal_.load();
@@ -203,7 +209,10 @@ std::string Metrics::renderPrometheus(uint64_t logLines) const {
         << "myself_requests_total " << data.requestsTotal << "\n"
         << "# HELP myself_requests_rate_limited_total 超过限流阈值被拦截的 HTTP 请求数\n"
         << "# TYPE myself_requests_rate_limited_total counter\n"
-        << "myself_requests_rate_limited_total " << data.requestsRateLimited << "\n";
+        << "myself_requests_rate_limited_total " << data.requestsRateLimited << "\n"
+        << "# HELP myself_requests_not_modified_total 条件请求命中返回 304 的次数（省下的整包传输）\n"
+        << "# TYPE myself_requests_not_modified_total counter\n"
+        << "myself_requests_not_modified_total " << data.requestsNotModified << "\n";
 
     static const char* kClassNames[5] = {"1xx", "2xx", "3xx", "4xx", "5xx"};
     out << "# HELP myself_requests_by_status 按状态码类别统计的请求数\n"
@@ -294,6 +303,12 @@ void connectionRejected() {
 void requestRateLimited() {
     if (Metrics* m = Metrics::global()) {
         m->onRequestRateLimited();
+    }
+}
+
+void requestNotModified() {
+    if (Metrics* m = Metrics::global()) {
+        m->onRequestNotModified();
     }
 }
 

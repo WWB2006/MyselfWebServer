@@ -15,6 +15,7 @@
 | --- | --- |
 | 网络模型 | 非阻塞 socket + epoll ET，主线程 accept，N 个 IO 线程读写（one loop per thread） |
 | HTTP | HTTP/1.1 请求解析（有限状态机），支持 GET 与 HEAD、keep-alive、静态文件、路由注册、目录穿越防护 |
+| 缓存协商 | 静态文件带强 `ETag` 与 `Last-Modified`，`If-None-Match` / `If-Modified-Since` 命中返回零 Body 的 `304 Not Modified`（RFC 9110 §13） |
 | 连接管理 | shared_ptr + Channel::tie 保活，写缓冲与 EPOLLOUT 回填，超时与异常统一收口 |
 | 定时器 | 由 epoll_wait 超时驱动，支持一次性与重复任务、取消，空闲连接自动断开 |
 | 日志 | 分级（trace/debug/info/warn/error）、异步双缓冲落盘、按大小与日期轮转 |
@@ -96,24 +97,26 @@ curl -s http://127.0.0.1:8080/metrics        # Prometheus 指标
 
 | 路径 | 方法 | 说明 |
 | --- | --- | --- |
-| `/`、`/index.html` | GET / HEAD | 静态文件，未命中返回 404 |
-| `/api/status` | GET | JSON：连接数、请求数、错误数、字节数、延迟分位、日志行数、运行时长 |
+| `/`、`/index.html` | GET / HEAD | 静态文件，未命中返回 404；带 `ETag` / `Last-Modified`，条件请求命中返回 `304` |
+| `/api/status` | GET | JSON：连接数、请求数（含限流与 304 命中数）、错误数、字节数、延迟分位、日志行数、运行时长 |
 | `/metrics` | GET | Prometheus 文本格式，含 `myself_*` 计数器与延迟直方图 |
 
 ## 测试
 
 ```bash
-./scripts/run_unit_tests.sh      # GoogleTest 单元测试（46 个用例）
-./scripts/run_api_tests.sh       # pytest 接口测试（15 个用例，夹具自动拉起服务）
+./scripts/run_unit_tests.sh      # GoogleTest 单元测试（61 个用例）
+./scripts/run_api_tests.sh       # pytest 接口测试（23 个用例，夹具自动拉起服务）
 ./scripts/release_check.sh       # 发布门禁：构建 + 单测 + 接口测试 + 故障注入 + 冒烟压测
 ```
 
 单元测试覆盖 Buffer（含 readFd）、HttpParser（半包、粘包、pipelining、非法输入）、
-Router（404、目录穿越、405、Content-Type）、Metrics（直方图累计语义、分位、Prometheus 文本）、
+Router（404、目录穿越、405、Content-Type、ETag 校验器、304 命中与优先级、指纹失效）、
+Metrics（直方图累计语义、分位、Prometheus 文本）、TokenBucket（突发、补发、并发竞争）、
 TimerQueue（一次性、取消、重复、回调内自取消）与 LogStream。
 
-接口测试覆盖 HTTP 行为（200/404/HEAD/keep-alive/目录穿越）与指标一致性
-（`myself_requests_total` 与压测请求数、4xx 分类、直方图累计语义、连接仪表）。
+接口测试覆盖 HTTP 行为（200/404/HEAD/keep-alive/目录穿越/条件请求 304）、限流反压
+（429 + `Retry-After`、监控白名单）与指标一致性（`myself_requests_total` 与压测请求数、
+4xx 分类、直方图累计语义、连接仪表）。
 
 ## 性能与稳定性
 

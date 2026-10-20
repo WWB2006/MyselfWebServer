@@ -1,9 +1,11 @@
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -27,13 +29,38 @@ public:
             return;
         }
         std::remove((dir_ + "/index.html").c_str());
+        for (const std::string& name : files_) {
+            std::remove((dir_ + "/" + name).c_str());
+        }
+        for (auto it = dirs_.rbegin(); it != dirs_.rend(); ++it) {
+            ::rmdir((dir_ + "/" + *it).c_str());
+        }
         ::rmdir(dir_.c_str());
     }
 
     const std::string& path() const { return dir_; }
 
+    /// 写文件并登记，析构时一并删除
+    void write(const std::string& name, const std::string& content) {
+        std::ofstream out(dir_ + "/" + name);
+        out << content;
+        out.close();
+        files_.push_back(name);
+    }
+
+    /// 建子目录并登记
+    bool makeDir(const std::string& name) {
+        if (::mkdir((dir_ + "/" + name).c_str(), 0755) != 0) {
+            return false;
+        }
+        dirs_.push_back(name);
+        return true;
+    }
+
 private:
     std::string dir_;
+    std::vector<std::string> files_;
+    std::vector<std::string> dirs_;
 };
 
 void writeFile(const std::string& path, const std::string& content) {
@@ -45,6 +72,13 @@ myself::HttpRequest makeGet(const std::string& path) {
     myself::HttpRequest request;
     request.setMethod(myself::HttpRequest::Method::kGet);
     request.setPath(path);
+    return request;
+}
+
+myself::HttpRequest makeGetWith(const std::string& path, const std::string& key,
+                                const std::string& value) {
+    myself::HttpRequest request = makeGet(path);
+    request.addHeader(key, value);
     return request;
 }
 
@@ -123,4 +157,158 @@ TEST(RouterTest, ContentTypeForCommonExtensions) {
     EXPECT_EQ("application/json; charset=utf-8", myself::Router::contentTypeFor("/a/b.json"));
     EXPECT_EQ("image/png", myself::Router::contentTypeFor("/a/x.png"));
     EXPECT_EQ("application/octet-stream", myself::Router::contentTypeFor("/a/x.bin"));
+}
+
+// ---------- 条件请求：ETag / Last-Modified / 304 ----------
+
+TEST(RouterTest, StaticFileCarriesCacheValidators) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    const myself::HttpResponse response = router.handle(makeGet("/index.html"));
+
+    EXPECT_EQ(200, response.statusCode());
+
+    const std::string etag = response.header("ETag");
+    ASSERT_GE(etag.size(), 2u);
+    EXPECT_EQ('"', etag.front());   // 强校验器必须带双引号
+    EXPECT_EQ('"', etag.back());
+
+    const std::string lastModified = response.header("Last-Modified");
+    EXPECT_NE(std::string::npos, lastModified.find("GMT"));
+    EXPECT_EQ("no-cache", response.header("Cache-Control"));
+}
+
+TEST(RouterTest, MatchingIfNoneMatchReturns304WithoutBody) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    const std::string etag = router.handle(makeGet("/index.html")).header("ETag");
+    ASSERT_FALSE(etag.empty());
+
+    const myself::HttpResponse response =
+        router.handle(makeGetWith("/index.html", "If-None-Match", etag));
+
+    EXPECT_EQ(304, response.statusCode());
+    EXPECT_TRUE(response.body().empty());
+    EXPECT_EQ(etag, response.header("ETag"));
+
+    // 304 必须没有实体：序列化后以空行结尾，后面不跟任何字节
+    const std::string raw = response.serialize();
+    EXPECT_EQ("\r\n\r\n", raw.substr(raw.size() - 4));
+}
+
+TEST(RouterTest, WeakAndListedIfNoneMatchAlsoMatch) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    const std::string etag = router.handle(makeGet("/index.html")).header("ETag");
+    ASSERT_FALSE(etag.empty());
+
+    // 弱校验器前缀 W/ 参与弱比较
+    EXPECT_EQ(304, router.handle(makeGetWith("/index.html", "If-None-Match", "W/" + etag))
+                       .statusCode());
+    // 逗号分隔列表里命中任意一项即算命中
+    EXPECT_EQ(304, router.handle(makeGetWith("/index.html", "If-None-Match",
+                                             "\"stale-etag\", " + etag))
+                       .statusCode());
+    // "*" 表示只要资源存在就算命中
+    EXPECT_EQ(304, router
+                       .handle(makeGetWith("/index.html", "If-None-Match", "*"))
+                       .statusCode());
+}
+
+TEST(RouterTest, StaleIfNoneMatchReturns200) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    const myself::HttpResponse response =
+        router.handle(makeGetWith("/index.html", "If-None-Match", "\"deadbeef-0\""));
+
+    EXPECT_EQ(200, response.statusCode());
+    EXPECT_EQ("<h1>ok</h1>", response.body());
+}
+
+TEST(RouterTest, IfModifiedSinceEqualToLastModifiedReturns304) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    const std::string lastModified =
+        router.handle(makeGet("/index.html")).header("Last-Modified");
+    ASSERT_FALSE(lastModified.empty());
+
+    const myself::HttpResponse response =
+        router.handle(makeGetWith("/index.html", "If-Modified-Since", lastModified));
+
+    EXPECT_EQ(304, response.statusCode());
+    EXPECT_TRUE(response.body().empty());
+}
+
+TEST(RouterTest, OlderIfModifiedSinceReturns200) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    // 客户端副本比文件更旧 -> 必须回完整实体
+    const myself::HttpResponse response = router.handle(
+        makeGetWith("/index.html", "If-Modified-Since", "Sun, 06 Nov 1994 08:49:37 GMT"));
+
+    EXPECT_EQ(200, response.statusCode());
+    EXPECT_EQ("<h1>ok</h1>", response.body());
+}
+
+TEST(RouterTest, IfNoneMatchTakesPrecedenceOverIfModifiedSince) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    const std::string etag = router.handle(makeGet("/index.html")).header("ETag");
+    const std::string lastModified =
+        router.handle(makeGet("/index.html")).header("Last-Modified");
+    ASSERT_FALSE(etag.empty());
+    ASSERT_FALSE(lastModified.empty());
+
+    // ETag 不匹配 + IMS 看起来很新：按 RFC 9110，以 If-None-Match 为准 -> 200
+    myself::HttpRequest request = makeGet("/index.html");
+    request.addHeader("If-None-Match", "\"stale-etag\"");
+    request.addHeader("If-Modified-Since", lastModified);
+    EXPECT_EQ(200, router.handle(request).statusCode());
+
+    // ETag 匹配 + IMS 很旧：同样以 If-None-Match 为准 -> 304
+    myself::HttpRequest second = makeGet("/index.html");
+    second.addHeader("If-None-Match", etag);
+    second.addHeader("If-Modified-Since", "Sun, 06 Nov 1994 08:49:37 GMT");
+    EXPECT_EQ(304, router.handle(second).statusCode());
+}
+
+TEST(RouterTest, ETagChangesWhenFileContentChanges) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    const std::string before = router.handle(makeGet("/index.html")).header("ETag");
+    ASSERT_FALSE(before.empty());
+
+    // 内容变长：即使 mtime 落在同一秒，指纹也必须变化
+    dir.write("index.html", "<h1>ok</h1><p>more</p>");
+    const std::string after = router.handle(makeGet("/index.html")).header("ETag");
+
+    EXPECT_FALSE(after.empty());
+    EXPECT_NE(before, after);
+    // 旧指纹失效：拿旧 ETag 请求必须回完整实体，而不是错误的 304
+    EXPECT_EQ(200, router.handle(makeGetWith("/index.html", "If-None-Match", before))
+                       .statusCode());
+}
+
+TEST(RouterTest, DirectoryIsNotServedAsFile) {
+    TempDir dir;
+    ASSERT_TRUE(dir.makeDir("assets"));
+
+    myself::Router router(dir.path());
+    EXPECT_EQ(404, router.handle(makeGet("/assets")).statusCode());
 }

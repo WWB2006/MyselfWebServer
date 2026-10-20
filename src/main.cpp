@@ -248,6 +248,7 @@ std::string statusJson(const myself::Metrics::Snapshot& data, size_t ioThreads,
         << "},"
         << "\"requests\":{\"total\":" << data.requestsTotal
         << ",\"rateLimited\":" << data.requestsRateLimited
+        << ",\"notModified\":" << data.requestsNotModified
         << ",\"errors\":" << data.errorsTotal << ",\"byStatusClass\":{\"1xx\":"
         << data.statusClasses[0] << ",\"2xx\":" << data.statusClasses[1]
         << ",\"3xx\":" << data.statusClasses[2] << ",\"4xx\":" << data.statusClasses[3]
@@ -417,6 +418,9 @@ int main(int argc, char* argv[]) {
                             auto respond = [c, headOnly, keepAlive, ioLoop, requestStart](
                                                myself::HttpResponse response) {
                                 response.setCloseConnection(!keepAlive);
+                                if (response.statusCode() == 304) {
+                                    myself::metrics::requestNotModified();
+                                }
                                 c->send(response.serialize(!headOnly));
                                 myself::metrics::requestFinished(
                                     response.statusCode(),
