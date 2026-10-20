@@ -83,12 +83,13 @@ struct ServerOptions {
     size_t maxConnections{0};        // >0 时启用过载保护，超出返回 503
     double rateLimitQps{0.0};         // >0 时启用令牌桶限流，超出返回 429
     double rateLimitBurst{0.0};       // 令牌桶突发容量，默认等于 rateLimitQps
+    size_t zeroCopyThreshold{64 * 1024};  // >= 该字节数的静态文件走 sendfile，0 关闭
 };
 
 void printUsage(const char* program) {
     std::cout << "usage: " << program << " [-p port] [-r wwwRoot] [-t ioThreads] "
                  "[-w workerThreads] [-i idleSeconds] [-m maxConnections]\n"
-                 "       [-R rateLimitQps] [-B rateLimitBurst]\n"
+                 "       [-R rateLimitQps] [-B rateLimitBurst] [-Z zeroCopyBytes]\n"
                  "       [-l logLevel] [-g logDir] [-s rollSizeMb] [-q] [-h]\n"
               << "  -p port          监听端口，默认 8080\n"
               << "  -r wwwRoot       静态资源目录，默认 www\n"
@@ -98,6 +99,8 @@ void printUsage(const char* program) {
               << "  -m maxConnections 最大并发连接数，默认 0（不限制），超出返回 503\n"
               << "  -R rateLimitQps  令牌桶限流速率 (QPS)，默认 0（不限制），超出返回 429\n"
               << "  -B burst         令牌桶突发容量 (Burst)，默认与 rateLimitQps 相同\n"
+              << "  -Z zeroCopyBytes 零拷贝阈值：>=(字节) 的静态文件走 sendfile，"
+                 "默认 65536，0 表示关闭\n"
               << "  -l logLevel      日志级别 trace/debug/info/warn/error，默认 info\n"
               << "  -g logDir        日志目录（启用异步落盘），默认只输出控制台\n"
               << "  -s rollSizeMb    单个日志文件大小上限，默认 32MB\n"
@@ -165,6 +168,11 @@ ParseResult parseArgs(int argc, char* argv[], ServerOptions* options) {
         }
         if (arg == "-B" && hasValue) {
             options->rateLimitBurst = std::strtod(argv[++i], nullptr);
+            continue;
+        }
+        if (arg == "-Z" && hasValue) {
+            options->zeroCopyThreshold =
+                static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
             continue;
         }
         std::cerr << "unknown or incomplete argument: " << arg << "\n";
@@ -341,6 +349,7 @@ int main(int argc, char* argv[]) {
         }
 
         myself::Router router(options.wwwRoot);
+        router.setZeroCopyThreshold(options.zeroCopyThreshold);
         router.registerHandler(
             "/api/status",
             [&metrics, &ioPool, &workerPool, &timerCount,
@@ -422,6 +431,10 @@ int main(int argc, char* argv[]) {
                                     myself::metrics::requestNotModified();
                                 }
                                 c->send(response.serialize(!headOnly));
+                                if (!headOnly && response.hasFileBody()) {
+                                    // 零拷贝：头部已入发送队列，文件体交给 sendfile(2)
+                                    c->sendFile(response.fileBody());
+                                }
                                 myself::metrics::requestFinished(
                                     response.statusCode(),
                                     myself::msBetween(requestStart, myself::now()));

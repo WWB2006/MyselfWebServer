@@ -10,6 +10,7 @@
 #include "myself/net/Channel.h"
 #include "myself/net/Socket.h"
 #include "myself/timer/Timer.h"
+#include "myself/util/FileBody.h"
 
 namespace myself {
 
@@ -39,6 +40,11 @@ public:
     /// 发送数据；写不完的部分进入输出缓冲区并注册写事件。
     void send(const std::string& data);
 
+    /// 零拷贝发送一段文件（sendfile(2)）。必须紧跟在 send(响应头) 之后调用：
+    /// 文件数据会排在「当前已缓冲的所有字节」之后、「后续 send」之前。
+    /// 上一个大文件还没发完时会自动退化成内存缓冲，保证响应顺序不乱。
+    void sendFile(const FileBodyPtr& file);
+
     void shutdownWrite();
     void forceClose();
 
@@ -60,6 +66,11 @@ private:
     void handleError();
     void sendInLoop(const std::string& data);
 
+    /// 从输出缓冲写出至多 limit 字节；返回 false 表示遇到 EAGAIN 或已关闭
+    bool flushOutput(size_t limit);
+    /// 用 sendfile 推进待发文件；返回 false 表示遇到 EAGAIN 或已关闭
+    bool sendPendingFile();
+
     void refreshIdleTimer();
     void handleIdleTimeout();
 
@@ -72,6 +83,11 @@ private:
     uint16_t peerPort_;
     bool closed_{false};
     bool shutdownAfterWrite_{false};
+    // 零拷贝：文件体必须排在它前面那批字节（响应头/更早的响应）之后
+    FileBodyPtr pendingFile_;
+    off_t fileOffset_{0};
+    size_t fileRemaining_{0};
+    size_t preFileBytes_{0};
     double idleTimeoutSeconds_{0.0};
     TimerId idleTimer_;
     MessageCallback messageCallback_;

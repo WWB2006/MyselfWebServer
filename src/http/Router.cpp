@@ -1,5 +1,6 @@
 #include "myself/http/Router.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -308,6 +310,13 @@ HttpResponse Router::serveStaticFile(const std::string& path,
         return response;
     }
 
+    // 大文件走零拷贝：不把内容读进用户态，交给 sendfile(2) 在内核里直接对拷
+    if (zeroCopyThreshold_ > 0 &&
+        static_cast<size_t>(info.st_size) >= zeroCopyThreshold_) {
+        return serveFileBody(fullPath, path, static_cast<off_t>(info.st_size), etag,
+                             lastModified);
+    }
+
     std::ifstream file(fullPath, std::ios::binary);
     if (!file) {
         return HttpResponse::notFound();
@@ -323,6 +332,27 @@ HttpResponse Router::serveStaticFile(const std::string& path,
     response.setHeader("Last-Modified", lastModified);
     response.setHeader("Cache-Control", "no-cache");
     response.setBody(content.str());
+    return response;
+}
+
+HttpResponse Router::serveFileBody(const std::string& fullPath, const std::string& path,
+                                   off_t size, const std::string& etag,
+                                   const std::string& lastModified) const {
+    // O_CLOEXEC：避免 fork 出去的子进程继承这个 fd
+    const int fd = ::open(fullPath.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return HttpResponse::notFound();
+    }
+
+    HttpResponse response;
+    response.setStatus(200, "OK");
+    response.setContentType(contentTypeFor(path));
+    // 文件体不在 body_ 里，必须显式给出长度，否则 serialize 会写成 0
+    response.setHeader("Content-Length", std::to_string(static_cast<long long>(size)));
+    response.setHeader("ETag", etag);
+    response.setHeader("Last-Modified", lastModified);
+    response.setHeader("Cache-Control", "no-cache");
+    response.setFileBody(std::make_shared<FileBody>(fd, 0, static_cast<size_t>(size)));
     return response;
 }
 

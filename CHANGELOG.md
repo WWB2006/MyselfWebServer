@@ -2,6 +2,31 @@
 
 本文件按阶段记录可见变化。日期取自仓库提交记录，阶段内的多条提交合并为一条里程碑。
 
+## [1.3.0] - 2026-10-21
+
+静态文件零拷贝传输 (sendfile(2) Zero-Copy)。
+
+### Added
+
+- `include/myself/util/FileBody.h`：文件区间值对象，`shared_ptr` 共享所有权，
+  最后一份引用析构时关闭 fd，避免多线程传递中的重复 close
+- `Router` 按阈值分流：不小于阈值的静态文件只回头部 + 文件区间，用 `open(2)` + `sendfile(2)`
+  发送，不把内容读进用户态；小文件仍走内存缓冲
+- 命令行参数 `-Z <字节>`：零拷贝阈值，默认 65536，`0` 表示关闭（用于 A/B 压测）
+- `TcpConnection::sendFile()`：三阶段写路径（写头 → sendfile → 写后续响应），
+  用 `preFileBytes_` 保证 pipelining 场景下的响应顺序；ET 模式循环到 EAGAIN 续传
+- 健壮性：文件中途截断按发完处理、连接关闭时释放待发 fd、`shutdownWrite` 感知待发文件、
+  同一连接第二个大文件退化为 `pread` 内存缓冲
+- 自动化测试：新增 3 项 Router 单元测试与 4 项零拷贝接口测试（内容完整性、HEAD、
+  keep-alive 复用、pipelining 顺序）
+- `scripts/bench_zero_copy.sh`：生成大文件并按 `-Z 0` / 默认阈值做 A/B 下载对比
+- `docs/stage-12-零拷贝文件传输.md`：数据通路对比、实现细节、边界与面试问答
+
+### Changed
+
+- `HttpResponse` 支持文件体（`setFileBody` / `hasFileBody`），序列化时文件体不占 `body_`，
+  `Content-Length` 由调用方显式设置
+
 ## [1.2.0] - 2026-10-21
 
 HTTP 条件请求与协商缓存 (Conditional GET / ETag / 304 Not Modified)。

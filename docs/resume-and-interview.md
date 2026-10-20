@@ -22,12 +22,17 @@
    支持 `If-None-Match`（强/弱/列表/`*`）与 `If-Modified-Since`，命中返回零 Body 的
    `304 Not Modified`，并暴露 `myself_requests_not_modified_total` 统计省下的整包传输。
    证据：`src/http/Router.cpp`、`docs/stage-11-ETag与条件请求.md`。
+7. 实现静态文件 `sendfile(2)` 零拷贝传输：按 64KB 阈值分流，大文件由内核在 PageCache 与
+   socket 缓冲之间直接对拷，用户态零参与；用 `preFileBytes_` 三阶段写路径保证 pipelining
+   下的响应顺序，并处理 ET 模式 EAGAIN 续传、文件截断、连接中断释放 fd 等边界。
+   证据：`include/myself/util/FileBody.h`、`docs/stage-12-零拷贝文件传输.md`、
+   `scripts/bench_zero_copy.sh`。
 
 ## 二、简历条目（测试/测试开发版）
 
-1. 为该 HTTP 服务器搭建两层自动化测试：GoogleTest 单元测试 61 个用例（协议解析、缓冲区、
-   路由与条件请求、指标、定时器、令牌桶）与 pytest 接口测试 23 个用例（HTTP 行为、
-   限流反压与指标一致性）。
+1. 为该 HTTP 服务器搭建两层自动化测试：GoogleTest 单元测试 64 个用例（协议解析、缓冲区、
+   路由与条件请求、指标、定时器、令牌桶）与 pytest 接口测试 27 个用例（HTTP 行为、
+   条件请求、零拷贝大文件、限流反压与指标一致性）。
    证据：`tests/`、GitHub Actions 运行记录。
 2. 编写故障注入脚本覆盖半包、粘包、慢连接、超长请求头/体与连接抖动六类场景，
    全部可复现并通过。证据：`scripts/fault_injection.py` 输出、阶段 9 验收记录。

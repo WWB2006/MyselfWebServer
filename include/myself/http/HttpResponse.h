@@ -5,6 +5,8 @@
 #include <map>
 #include <string>
 
+#include "myself/util/FileBody.h"
+
 namespace myself {
 
 /// 一条待发送的 HTTP 响应。
@@ -44,6 +46,12 @@ public:
     void setBody(std::string body) { body_ = std::move(body); }
     const std::string& body() const { return body_; }
 
+    /// 设置零拷贝文件体：body_ 保持为空，由 TcpConnection 用 sendfile(2) 直接发送。
+    /// 调用方必须显式设置 Content-Length（serialize 只按 body_ 长度兜底）。
+    void setFileBody(FileBodyPtr file) { fileBody_ = std::move(file); }
+    bool hasFileBody() const { return fileBody_ != nullptr; }
+    const FileBodyPtr& fileBody() const { return fileBody_; }
+
     void setCloseConnection(bool on) { closeConnection_ = on; }
     bool closeConnection() const { return closeConnection_; }
 
@@ -64,6 +72,7 @@ private:
     std::string statusMessage_{"OK"};
     std::map<std::string, std::string> headers_;
     std::string body_;
+    FileBodyPtr fileBody_;
     bool closeConnection_{false};
 };
 

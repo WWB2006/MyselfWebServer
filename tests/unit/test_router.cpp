@@ -312,3 +312,61 @@ TEST(RouterTest, DirectoryIsNotServedAsFile) {
     myself::Router router(dir.path());
     EXPECT_EQ(404, router.handle(makeGet("/assets")).statusCode());
 }
+
+// ---------- 零拷贝：大文件只回头部 + 文件区间 ----------
+
+TEST(RouterTest, LargeFileUsesZeroCopyFileBody) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    router.setZeroCopyThreshold(1);  // 让 11 字节的文件也走零拷贝分支
+
+    const myself::HttpResponse response = router.handle(makeGet("/index.html"));
+
+    EXPECT_EQ(200, response.statusCode());
+    EXPECT_TRUE(response.hasFileBody());
+    EXPECT_TRUE(response.body().empty());  // 内容没有读进用户态
+    EXPECT_EQ("11", response.header("Content-Length"));
+
+    // 从 fd 读回内容，确认文件区间正确
+    ASSERT_TRUE(response.hasFileBody());
+    char buffer[64] = {0};
+    const ssize_t n = ::pread(response.fileBody()->fd(), buffer, sizeof(buffer),
+                              response.fileBody()->offset());
+    ASSERT_EQ(11, n);
+    EXPECT_EQ("<h1>ok</h1>", std::string(buffer, static_cast<size_t>(n)));
+}
+
+TEST(RouterTest, ZeroCopyThresholdZeroKeepsBodyInMemory) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    router.setZeroCopyThreshold(0);  // 关闭零拷贝，便于做 A/B 压测
+
+    const myself::HttpResponse response = router.handle(makeGet("/index.html"));
+
+    EXPECT_EQ(200, response.statusCode());
+    EXPECT_FALSE(response.hasFileBody());
+    EXPECT_EQ("<h1>ok</h1>", response.body());
+}
+
+TEST(RouterTest, ZeroCopyConditionalRequestReturns304WithoutFileBody) {
+    TempDir dir;
+    dir.write("index.html", "<h1>ok</h1>");
+
+    myself::Router router(dir.path());
+    router.setZeroCopyThreshold(1);
+
+    const std::string etag = router.handle(makeGet("/index.html")).header("ETag");
+    ASSERT_FALSE(etag.empty());
+
+    const myself::HttpResponse response =
+        router.handle(makeGetWith("/index.html", "If-None-Match", etag));
+
+    EXPECT_EQ(304, response.statusCode());
+    // 304 不该把文件 fd 带出来，否则每条 304 都白开一次 fd
+    EXPECT_FALSE(response.hasFileBody());
+    EXPECT_TRUE(response.body().empty());
+}
