@@ -80,6 +80,48 @@ run_smoke_bench() {
     return $result
 }
 
+check_line_endings() {
+    # 脚本必须是 LF 行尾。Windows 上 core.autocrlf=true 或文本模式写文件会把
+    # \n 变成 \r\n，shebang 就成了 "#!/usr/bin/env bash\r"，Linux 报：
+    #     /usr/bin/env: "bash\r": 没有那个文件或目录
+    local bad=0 file cr first
+    local -a files=()
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+        while IFS= read -r file; do
+            [ -n "$file" ] && [ -f "$file" ] && files+=("$file")
+        done < <(git ls-files '*.sh' '*.py' '*.bash' 2>/dev/null)
+    fi
+    if [ "${#files[@]}" -eq 0 ]; then
+        while IFS= read -r file; do
+            files+=("$file")
+        done < <(find scripts tests -type f \( -name '*.sh' -o -name '*.py' \) 2>/dev/null)
+    fi
+
+    for file in "${files[@]}"; do
+        cr=$(tr -cd '\r' <"$file" | wc -c)
+        if [ "$cr" -ne 0 ]; then
+            echo "CRLF 行尾（${cr} 个 CR）：$file"
+            bad=1
+            continue
+        fi
+        case "$file" in
+            *.sh | *.bash)
+                first=$(head -n 1 "$file")
+                case "$first" in
+                    '#!/usr/bin/env bash' | '#!/bin/bash') ;;
+                    *)
+                        echo "shebang 异常：$file → [$first]"
+                        bad=1
+                        ;;
+                esac
+                ;;
+        esac
+    done
+
+    [ "$bad" -eq 0 ] && echo "已检查 ${#files[@]} 个脚本，全部为 LF 行尾"
+    return "$bad"
+}
+
 check_documents() {
     local missing=0
     for file in README.md CHANGELOG.md LICENSE docs/architecture.md \
@@ -98,6 +140,7 @@ check_documents() {
 }
 
 echo "发布门禁开始（端口 ${PORT}）"
+step "脚本行尾（LF）与 shebang" check_line_endings
 step "构建（Release）" build_project
 step "单元测试" run_unit_tests
 step "接口测试" run_api_tests
