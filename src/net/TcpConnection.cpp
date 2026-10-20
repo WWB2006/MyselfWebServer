@@ -73,7 +73,13 @@ void TcpConnection::sendInLoop(const std::string& data) {
 
 void TcpConnection::shutdownWrite() {
     if (!closed_) {
-        ::shutdown(socket_.fd(), SHUT_WR);
+        if (!channel_.isWriting() && output_.readableBytes() == 0) {
+            ::shutdown(socket_.fd(), SHUT_WR);
+        } else {
+            // 输出缓冲区仍有待发送数据，延迟到 handleWrite 冲刷完毕后再执行半关闭，
+            // 避免提前关闭写端触发 EPIPE (Broken pipe) 与 TCP RST
+            shutdownAfterWrite_ = true;
+        }
     }
 }
 
@@ -159,6 +165,9 @@ void TcpConnection::handleRead() {
 void TcpConnection::handleWrite() {
     if (output_.readableBytes() == 0) {
         channel_.disableWriting();
+        if (shutdownAfterWrite_) {
+            ::shutdown(socket_.fd(), SHUT_WR);
+        }
         return;
     }
 
@@ -170,6 +179,9 @@ void TcpConnection::handleWrite() {
             output_.retrieve(static_cast<size_t>(n));
             if (output_.readableBytes() == 0) {
                 channel_.disableWriting();
+                if (shutdownAfterWrite_) {
+                    ::shutdown(socket_.fd(), SHUT_WR);
+                }
                 return;
             }
             continue;

@@ -32,6 +32,7 @@
 #include "myself/net/TcpConnection.h"
 #include "myself/thread/ThreadPool.h"
 #include "myself/util/Metrics.h"
+#include "myself/util/TokenBucket.h"
 #include "myself/util/Version.h"
 
 namespace {
@@ -80,11 +81,14 @@ struct ServerOptions {
     size_t logRollSizeMb{32};        // 单个日志文件大小上限
     bool quiet{false};               // 只写文件，不输出到控制台
     size_t maxConnections{0};        // >0 时启用过载保护，超出返回 503
+    double rateLimitQps{0.0};         // >0 时启用令牌桶限流，超出返回 429
+    double rateLimitBurst{0.0};       // 令牌桶突发容量，默认等于 rateLimitQps
 };
 
 void printUsage(const char* program) {
     std::cout << "usage: " << program << " [-p port] [-r wwwRoot] [-t ioThreads] "
                  "[-w workerThreads] [-i idleSeconds] [-m maxConnections]\n"
+                 "       [-R rateLimitQps] [-B rateLimitBurst]\n"
                  "       [-l logLevel] [-g logDir] [-s rollSizeMb] [-q] [-h]\n"
               << "  -p port          监听端口，默认 8080\n"
               << "  -r wwwRoot       静态资源目录，默认 www\n"
@@ -92,6 +96,8 @@ void printUsage(const char* program) {
               << "  -w workerThreads 计算线程池大小，默认 0（关闭）\n"
               << "  -i idleSeconds   空闲连接超时秒数，默认 0（不启用）\n"
               << "  -m maxConnections 最大并发连接数，默认 0（不限制），超出返回 503\n"
+              << "  -R rateLimitQps  令牌桶限流速率 (QPS)，默认 0（不限制），超出返回 429\n"
+              << "  -B burst         令牌桶突发容量 (Burst)，默认与 rateLimitQps 相同\n"
               << "  -l logLevel      日志级别 trace/debug/info/warn/error，默认 info\n"
               << "  -g logDir        日志目录（启用异步落盘），默认只输出控制台\n"
               << "  -s rollSizeMb    单个日志文件大小上限，默认 32MB\n"
@@ -151,6 +157,14 @@ ParseResult parseArgs(int argc, char* argv[], ServerOptions* options) {
         if (arg == "-m" && hasValue) {
             options->maxConnections =
                 static_cast<size_t>(std::strtoul(argv[++i], nullptr, 10));
+            continue;
+        }
+        if (arg == "-R" && hasValue) {
+            options->rateLimitQps = std::strtod(argv[++i], nullptr);
+            continue;
+        }
+        if (arg == "-B" && hasValue) {
+            options->rateLimitBurst = std::strtod(argv[++i], nullptr);
             continue;
         }
         std::cerr << "unknown or incomplete argument: " << arg << "\n";
@@ -233,6 +247,7 @@ std::string statusJson(const myself::Metrics::Snapshot& data, size_t ioThreads,
         << ",\"total\":" << data.connectionsTotal << ",\"max\":" << data.connectionsMax
         << "},"
         << "\"requests\":{\"total\":" << data.requestsTotal
+        << ",\"rateLimited\":" << data.requestsRateLimited
         << ",\"errors\":" << data.errorsTotal << ",\"byStatusClass\":{\"1xx\":"
         << data.statusClasses[0] << ",\"2xx\":" << data.statusClasses[1]
         << ",\"3xx\":" << data.statusClasses[2] << ",\"4xx\":" << data.statusClasses[3]
@@ -318,6 +333,12 @@ int main(int argc, char* argv[]) {
             baseLoop.quit();
         });
 
+        myself::TokenBucket rateLimiter(options.rateLimitQps, options.rateLimitBurst);
+        if (rateLimiter.isEnabled()) {
+            LOG_INFO << "rate limiter enabled, rate=" << options.rateLimitQps
+                     << " qps, burst=" << rateLimiter.burst();
+        }
+
         myself::Router router(options.wwwRoot);
         router.registerHandler(
             "/api/status",
@@ -361,14 +382,14 @@ int main(int argc, char* argv[]) {
             myself::EventLoop* ioLoop = ioPool.nextLoop();
 
             // 连接必须在它所属的 IO 线程里创建并注册事件，否则就是跨线程操作 epoll
-            ioLoop->runInLoop([&router, &workerPool, &registry, connfd, ip, peerPort, ioLoop,
-                               idleSeconds = options.idleTimeoutSeconds] {
+            ioLoop->runInLoop([&router, &workerPool, &registry, &rateLimiter, connfd, ip, peerPort,
+                               ioLoop, idleSeconds = options.idleTimeoutSeconds] {
                 auto conn = std::make_shared<myself::TcpConnection>(ioLoop, connfd, ip, peerPort);
                 const int fd = conn->fd();
                 auto parser = std::make_shared<myself::HttpParser>();
 
                 conn->setMessageCallback(
-                    [&router, &workerPool, parser, ioLoop](
+                    [&router, &workerPool, &rateLimiter, parser, ioLoop](
                         const std::shared_ptr<myself::TcpConnection>& c,
                         myself::Buffer* input) {
                         for (;;) {
@@ -406,6 +427,20 @@ int main(int argc, char* argv[]) {
                                     c->shutdownWrite();
                                 }
                             };
+
+                            // 令牌桶限流保护：白名单放行运维诊断与指标采集（/api/status, /metrics），外部请求超限返回 429
+                            const bool isManagement =
+                                (request.path() == "/api/status" || request.path() == "/metrics");
+                            if (!isManagement && !rateLimiter.tryAcquire()) {
+                                myself::metrics::requestRateLimited();
+                                LOG_WARN << "rate limit exceeded for path=" << request.path()
+                                         << " peer=" << c->peerIp() << ":" << c->peerPort();
+                                respond(myself::HttpResponse::tooManyRequests(1));
+                                if (!keepAlive) {
+                                    return;
+                                }
+                                continue;
+                            }
 
                             const bool offload = workerPool.threadCount() > 0 &&
                                                  request.path().rfind("/api/", 0) != 0;
@@ -450,7 +485,8 @@ int main(int argc, char* argv[]) {
         LOG_INFO << myself::buildInfo() << " http server started, io threads="
                  << options.ioThreads << " worker threads=" << options.workerThreads
                  << " idle timeout=" << options.idleTimeoutSeconds
-                 << "s log level=" << options.logLevel << " www root=" << options.wwwRoot;
+                 << "s rate limit=" << options.rateLimitQps
+                 << " qps log level=" << options.logLevel << " www root=" << options.wwwRoot;
 
         baseLoop.loop();
 

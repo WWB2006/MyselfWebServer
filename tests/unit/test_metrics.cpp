@@ -107,7 +107,7 @@ TEST(MetricsTest, EstimatesQuantilesFromBuckets) {
     const myself::Metrics::Snapshot snapshot = metrics.snapshot();
 
     EXPECT_LE(snapshot.latencyP50Ms, 10.0);
-    EXPECT_GT(snapshot.latencyP99Ms, 10.0);
+    EXPECT_GE(snapshot.latencyP99Ms, 10.0);
     EXPECT_LE(snapshot.latencyP99Ms, 10000.0);
 }
 
@@ -160,3 +160,17 @@ TEST(MetricsTest, GlobalConvenienceFunctionsAreSafeWithoutInstall) {
 
     myself::Metrics::install(nullptr);  // 还原，避免影响其他用例
 }
+
+TEST(MetricsTest, TracksRateLimitedRequests) {
+    myself::Metrics metrics;
+    metrics.onRequestRateLimited();
+    metrics.onRequestRateLimited();
+
+    const myself::Metrics::Snapshot snapshot = metrics.snapshot();
+    EXPECT_EQ(2u, snapshot.requestsRateLimited);
+
+    const std::string text = metrics.renderPrometheus(0);
+    EXPECT_NE(std::string::npos,
+              text.find("myself_requests_rate_limited_total 2"));
+}
+

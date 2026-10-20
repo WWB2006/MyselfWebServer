@@ -33,6 +33,7 @@ public:
         int64_t connectionsCurrent{0};
         uint64_t connectionsMax{0};
         uint64_t requestsTotal{0};
+        uint64_t requestsRateLimited{0};
         uint64_t errorsTotal{0};
         uint64_t bytesReadTotal{0};
         uint64_t bytesWrittenTotal{0};
@@ -53,6 +54,8 @@ public:
     void onConnectionClosed();
     /// 超过连接上限被拒绝：计入拒绝数，不改变在线连接数
     void onConnectionRejected();
+    /// 超过限流阈值被拦截
+    void onRequestRateLimited();
 
     void onRequestStarted(MethodKind kind);
     /// statusCode 用于归类到 1xx..5xx；latencyMs 进入直方图
@@ -83,6 +86,7 @@ private:
     std::atomic<int64_t> connectionsCurrent_{0};
     std::atomic<uint64_t> connectionsMax_{0};
     std::atomic<uint64_t> requestsTotal_{0};
+    std::atomic<uint64_t> requestsRateLimited_{0};
     std::atomic<uint64_t> errorsTotal_{0};
     std::atomic<uint64_t> bytesReadTotal_{0};
     std::atomic<uint64_t> bytesWrittenTotal_{0};
@@ -100,6 +104,7 @@ namespace metrics {
 void connectionOpened();
 void connectionClosed();
 void connectionRejected();
+void requestRateLimited();
 void requestStarted(Metrics::MethodKind kind);
 void requestFinished(int statusCode, double latencyMs);
 void error();

@@ -36,6 +36,8 @@ public:
     static HttpResponse payloadTooLarge();
     /// 过载保护：连接数超过上限时返回，提示客户端稍后重试
     static HttpResponse serviceUnavailable();
+    /// 限流保护：请求速率超过令牌桶上限时返回 429 Too Many Requests，并携带 Retry-After
+    static HttpResponse tooManyRequests(int retryAfterSeconds = 1);
 
 private:
     int statusCode_{200};

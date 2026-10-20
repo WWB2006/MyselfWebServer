@@ -77,4 +77,14 @@ HttpResponse HttpResponse::serviceUnavailable() {
     return response;
 }
 
+HttpResponse HttpResponse::tooManyRequests(int retryAfterSeconds) {
+    HttpResponse response(false);
+    response.setStatus(429, "Too Many Requests");
+    response.setContentType("text/plain; charset=utf-8");
+    response.setHeader("Retry-After", std::to_string(retryAfterSeconds));
+    response.setBody("too many requests, please retry after " +
+                     std::to_string(retryAfterSeconds) + " second(s)\n");
+    return response;
+}
+
 }  // namespace myself

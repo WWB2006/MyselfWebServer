@@ -46,6 +46,10 @@ void Metrics::onConnectionRejected() {
     connectionsRejected_.fetch_add(1);
 }
 
+void Metrics::onRequestRateLimited() {
+    requestsRateLimited_.fetch_add(1);
+}
+
 void Metrics::onRequestStarted(MethodKind kind) {
     if (kind >= 0 && kind < kMethodCount) {
         methodCounts_[kind].fetch_add(1);
@@ -93,6 +97,7 @@ void Metrics::reset() {
     connectionsCurrent_.store(0);
     connectionsMax_.store(0);
     requestsTotal_.store(0);
+    requestsRateLimited_.store(0);
     errorsTotal_.store(0);
     bytesReadTotal_.store(0);
     bytesWrittenTotal_.store(0);
@@ -146,6 +151,7 @@ Metrics::Snapshot Metrics::snapshot() const {
     result.connectionsCurrent = connectionsCurrent_.load();
     result.connectionsMax = connectionsMax_.load();
     result.requestsTotal = requestsTotal_.load();
+    result.requestsRateLimited = requestsRateLimited_.load();
     result.errorsTotal = errorsTotal_.load();
     result.bytesReadTotal = bytesReadTotal_.load();
     result.bytesWrittenTotal = bytesWrittenTotal_.load();
@@ -194,7 +200,10 @@ std::string Metrics::renderPrometheus(uint64_t logLines) const {
 
     out << "# HELP myself_requests_total 累计处理的 HTTP 请求数\n"
         << "# TYPE myself_requests_total counter\n"
-        << "myself_requests_total " << data.requestsTotal << "\n";
+        << "myself_requests_total " << data.requestsTotal << "\n"
+        << "# HELP myself_requests_rate_limited_total 超过限流阈值被拦截的 HTTP 请求数\n"
+        << "# TYPE myself_requests_rate_limited_total counter\n"
+        << "myself_requests_rate_limited_total " << data.requestsRateLimited << "\n";
 
     static const char* kClassNames[5] = {"1xx", "2xx", "3xx", "4xx", "5xx"};
     out << "# HELP myself_requests_by_status 按状态码类别统计的请求数\n"
@@ -279,6 +288,12 @@ void connectionClosed() {
 void connectionRejected() {
     if (Metrics* m = Metrics::global()) {
         m->onConnectionRejected();
+    }
+}
+
+void requestRateLimited() {
+    if (Metrics* m = Metrics::global()) {
+        m->onRequestRateLimited();
     }
 }
 

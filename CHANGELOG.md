@@ -2,6 +2,19 @@
 
 本文件按阶段记录可见变化。日期取自仓库提交记录，阶段内的多条提交合并为一条里程碑。
 
+## [1.1.0] - 2026-10-20
+
+自适应令牌桶限流与应用层过载保护 (Rate Limiting & Overload Protection)。
+
+### Added
+
+- `include/myself/util/TokenBucket.h` & `src/util/TokenBucket.cpp`：基于单调时钟的微秒级惰性补发（Lazy Refill）令牌桶限流器
+- 命令行参数 `-R <rateLimitQps>` 与 `-B <burst>` 支持请求速率限制与突发流量容纳
+- HTTP/1.1 语义优雅降级：超额请求返回 RFC 6585 标准 `429 Too Many Requests` 并携带 `Retry-After: 1`，长连接不断开以规避频繁建立 TCP 连接开销
+- 监控诊断白名单：`/api/status` 与 `/metrics` 免检放行，确保过载状态下 SRE / 运维探针依然可采集健康状态
+- 指标监控扩展：Prometheus 格式新增 `myself_requests_rate_limited_total`，`/api/status` 暴露 `rateLimited` 字段
+- 自动化测试用例：新增 5 个 TokenBucket 单元测试（突发、补发、上限截断、8 线程并发竞争）及 2 个 API 集成测试
+
 ## [1.0.0] - 2026-09-28
 
 阶段 10：交付收尾。

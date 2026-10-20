@@ -9,6 +9,7 @@
 #include "myself/net/Buffer.h"
 #include "myself/net/Channel.h"
 #include "myself/net/Socket.h"
+#include "myself/timer/Timer.h"
 
 namespace myself {
 
@@ -41,6 +42,9 @@ public:
     void shutdownWrite();
     void forceClose();
 
+    /// 设置空闲超时（秒）；>0 时开启定时器，超时未收到数据自动断开。
+    void setIdleTimeout(double seconds);
+
     int fd() const { return socket_.fd(); }
     const std::string& peerIp() const { return peerIp_; }
     uint16_t peerPort() const { return peerPort_; }
@@ -56,6 +60,9 @@ private:
     void handleError();
     void sendInLoop(const std::string& data);
 
+    void refreshIdleTimer();
+    void handleIdleTimeout();
+
     EventLoop* loop_;
     Socket socket_;
     Channel channel_;
@@ -64,6 +71,9 @@ private:
     std::string peerIp_;
     uint16_t peerPort_;
     bool closed_{false};
+    bool shutdownAfterWrite_{false};
+    double idleTimeoutSeconds_{0.0};
+    TimerId idleTimer_;
     MessageCallback messageCallback_;
     CloseCallback closeCallback_;
 };
