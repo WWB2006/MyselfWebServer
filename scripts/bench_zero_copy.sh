@@ -10,7 +10,10 @@ SIZE_MB="${1:-200}"
 ROUNDS="${2:-3}"
 PORT_BASE="${PORT:-18090}"
 BIN="./build/webserver"
-ASSET="www/_bench_${SIZE_MB}m.bin"
+# 文件名带 PID：多个实例同时跑时不会互相删文件（上一版共用固定名，先退出的实例
+# 会把它 rm 掉，导致后来者拿到 404 却显示成「0.0 MB/s」）
+ASSET_NAME="_bench_${SIZE_MB}m_$$.bin"
+ASSET="www/${ASSET_NAME}"
 
 if [[ ! -x "$BIN" ]]; then
     echo "找不到 $BIN，请先执行：cmake -B build && cmake --build build -j\$(nproc)" >&2
@@ -40,6 +43,12 @@ ls -lh "$ASSET" | awk '{print "  实际大小：" $5}'
 echo "说明：每组先做一次不计时的完整下载预热（把文件读进 PageCache），"
 echo "     再计时 ${ROUNDS} 次；这样比较的是拷贝路径，而不是磁盘速度。"
 
+leftover="$(ls -1 www/_bench_*m_*.bin 2>/dev/null | grep -v "$ASSET_NAME" || true)"
+if [[ -n "$leftover" ]]; then
+    echo "发现其它压测残留文件（可能是并发或异常退出的实例），已忽略、不影响本次结果："
+    echo "$leftover" | sed 's/^/  /'
+fi
+
 port_free() {
     ! curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$1/404.html"
 }
@@ -59,9 +68,9 @@ start_server() {
         SERVER_PID=$!
 
         for _ in $(seq 1 60); do
-            if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:${port}/404.html"; then
+            if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:${port}/index.html"; then
                 PORT="$port"
-                URL="http://127.0.0.1:${port}/_bench_${SIZE_MB}m.bin"
+                URL="http://127.0.0.1:${port}/${ASSET_NAME}"
                 return 0
             fi
             if ! kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -104,23 +113,25 @@ run_case() {
     fi
 
     # 预热：完整下载一次，不计时（让后续比较的是拷贝路径而不是磁盘）
-    if ! curl -s -o /dev/null "$URL"; then
-        echo "  预热下载失败：$URL" >&2
+    if ! curl -sf -o /dev/null "$URL"; then
+        echo "  预热下载失败（HTTP 状态或连接异常）：$URL" >&2
         stop_server
         return 1
     fi
 
-    local i result total speed
+    local i result code rest total speed
     for i in $(seq 1 "$ROUNDS"); do
-        result="$(curl -s -o /dev/null -w "%{time_total} %{speed_download}" "$URL")" || {
-            echo "  第 ${i} 次下载失败" >&2
+        result="$(curl -sf -o /dev/null -w "%{http_code} %{time_total} %{speed_download}" "$URL")" || {
+            echo "  第 ${i} 次下载失败（HTTP 状态异常或连接中断）" >&2
             stop_server
             return 1
         }
-        total="${result%% *}"
-        speed="${result##* }"
-        awk -v t="$total" -v s="$speed" -v n="$i" \
-            'BEGIN { printf "  第 %d 次：耗时 %.3f s   速度 %.1f MB/s\n", n, t, s / 1048576 }'
+        code="${result%% *}"
+        rest="${result#* }"
+        total="${rest%% *}"
+        speed="${rest##* }"
+        awk -v c="$code" -v t="$total" -v s="$speed" -v n="$i" \
+            'BEGIN { printf "  第 %d 次：HTTP %s  耗时 %.3f s   速度 %.1f MB/s\n", n, c, t, s / 1048576 }'
     done
 
     stop_server
