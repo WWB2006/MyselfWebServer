@@ -18,6 +18,8 @@ namespace myself {
 class Router {
 public:
     using Handler = std::function<HttpResponse(const HttpRequest&)>;
+    using PrefixHandler =
+        std::function<HttpResponse(const HttpRequest&, const std::string& clientIp)>;
 
     explicit Router(std::string wwwRoot = "www") : wwwRoot_(std::move(wwwRoot)) {}
 
@@ -26,7 +28,12 @@ public:
         handlers_[path] = std::move(handler);
     }
 
-    HttpResponse handle(const HttpRequest& request) const;
+    /// 注册前缀匹配接口，例如反向代理网关 "/api/gateway"。
+    void registerPrefixHandler(const std::string& prefix, PrefixHandler handler) {
+        prefixHandlers_[prefix] = std::move(handler);
+    }
+
+    HttpResponse handle(const HttpRequest& request, const std::string& clientIp = "") const;
 
     /// 大于等于该字节数的静态文件走 sendfile(2) 零拷贝；0 表示一律读进内存。
     /// 小文件走内存是有意的：为几 KB 的数据多开一次 fd、多一次 sendfile 系统调用并不划算。
@@ -48,6 +55,7 @@ private:
     std::string wwwRoot_;
     size_t zeroCopyThreshold_{64 * 1024};
     std::map<std::string, Handler> handlers_;
+    std::map<std::string, PrefixHandler> prefixHandlers_;
 };
 
 }  // namespace myself

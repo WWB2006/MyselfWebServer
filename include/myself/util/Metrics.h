@@ -36,6 +36,8 @@ public:
         uint64_t requestsRateLimited{0};
         /// 条件请求命中（304 Not Modified）：省下的整包传输次数
         uint64_t requestsNotModified{0};
+        uint64_t requestsProxy{0};
+        uint64_t requestsProxyErrors{0};
         uint64_t errorsTotal{0};
         uint64_t bytesReadTotal{0};
         uint64_t bytesWrittenTotal{0};
@@ -60,6 +62,10 @@ public:
     void onRequestRateLimited();
     /// 条件请求命中，返回 304
     void onRequestNotModified();
+    /// 反向代理转发
+    void onRequestProxied();
+    /// 反向代理失败（502/504）
+    void onRequestProxyError();
 
     void onRequestStarted(MethodKind kind);
     /// statusCode 用于归类到 1xx..5xx；latencyMs 进入直方图
@@ -92,6 +98,8 @@ private:
     std::atomic<uint64_t> requestsTotal_{0};
     std::atomic<uint64_t> requestsRateLimited_{0};
     std::atomic<uint64_t> requestsNotModified_{0};
+    std::atomic<uint64_t> requestsProxy_{0};
+    std::atomic<uint64_t> requestsProxyErrors_{0};
     std::atomic<uint64_t> errorsTotal_{0};
     std::atomic<uint64_t> bytesReadTotal_{0};
     std::atomic<uint64_t> bytesWrittenTotal_{0};
@@ -111,6 +119,8 @@ void connectionClosed();
 void connectionRejected();
 void requestRateLimited();
 void requestNotModified();
+void requestProxied();
+void requestProxyError();
 void requestStarted(Metrics::MethodKind kind);
 void requestFinished(int statusCode, double latencyMs);
 void error();

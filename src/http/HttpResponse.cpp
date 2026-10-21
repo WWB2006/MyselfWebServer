@@ -87,4 +87,22 @@ HttpResponse HttpResponse::tooManyRequests(int retryAfterSeconds) {
     return response;
 }
 
+HttpResponse HttpResponse::badGateway(const std::string& reason) {
+    HttpResponse response(true);
+    response.setStatus(502, "Bad Gateway");
+    response.setContentType("application/json; charset=utf-8");
+    response.setBody("{\"error\":\"bad_gateway\",\"message\":\"" +
+                     (reason.empty() ? "Bad Gateway" : reason) + "\"}\n");
+    return response;
+}
+
+HttpResponse HttpResponse::gatewayTimeout(const std::string& reason) {
+    HttpResponse response(true);
+    response.setStatus(504, "Gateway Timeout");
+    response.setContentType("application/json; charset=utf-8");
+    response.setBody("{\"error\":\"gateway_timeout\",\"message\":\"" +
+                     (reason.empty() ? "Gateway Timeout" : reason) + "\"}\n");
+    return response;
+}
+
 }  // namespace myself

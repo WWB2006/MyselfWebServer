@@ -22,6 +22,7 @@
 #include "myself/http/HttpParser.h"
 #include "myself/http/HttpRequest.h"
 #include "myself/http/HttpResponse.h"
+#include "myself/http/ReverseProxy.h"
 #include "myself/http/Router.h"
 #include "myself/log/AsyncLogging.h"
 #include "myself/log/LogFile.h"
@@ -84,12 +85,16 @@ struct ServerOptions {
     double rateLimitQps{0.0};         // >0 时启用令牌桶限流，超出返回 429
     double rateLimitBurst{0.0};       // 令牌桶突发容量，默认等于 rateLimitQps
     size_t zeroCopyThreshold{64 * 1024};  // >= 该字节数的静态文件走 sendfile，0 关闭
+    std::string proxyPass{"127.0.0.1:8081"};  // 反向代理下游地址，例如 127.0.0.1:8081（none 关闭）
+    std::string proxyPrefix{"/api/gateway"};  // 反向代理路由前缀
+    double proxyTimeoutSeconds{3.0};          // 反向代理读写超时
 };
 
 void printUsage(const char* program) {
     std::cout << "usage: " << program << " [-p port] [-r wwwRoot] [-t ioThreads] "
                  "[-w workerThreads] [-i idleSeconds] [-m maxConnections]\n"
                  "       [-R rateLimitQps] [-B rateLimitBurst] [-Z zeroCopyBytes]\n"
+                 "       [-P proxyTarget] [--proxy-prefix prefix]\n"
                  "       [-l logLevel] [-g logDir] [-s rollSizeMb] [-q] [-h]\n"
               << "  -p port          监听端口，默认 8080\n"
               << "  -r wwwRoot       静态资源目录，默认 www\n"
@@ -101,6 +106,8 @@ void printUsage(const char* program) {
               << "  -B burst         令牌桶突发容量 (Burst)，默认与 rateLimitQps 相同\n"
               << "  -Z zeroCopyBytes 零拷贝阈值：>=(字节) 的静态文件走 sendfile，"
                  "默认 65536，0 表示关闭\n"
+              << "  -P proxyTarget   反向代理上游地址，默认 127.0.0.1:8081（设为 none 关闭）\n"
+              << "  --proxy-prefix prefix 反向代理路由前缀，默认 /api/gateway\n"
               << "  -l logLevel      日志级别 trace/debug/info/warn/error，默认 info\n"
               << "  -g logDir        日志目录（启用异步落盘），默认只输出控制台\n"
               << "  -s rollSizeMb    单个日志文件大小上限，默认 32MB\n"
@@ -173,6 +180,14 @@ ParseResult parseArgs(int argc, char* argv[], ServerOptions* options) {
         if (arg == "-Z" && hasValue) {
             options->zeroCopyThreshold =
                 static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
+            continue;
+        }
+        if ((arg == "-P" || arg == "--proxy-pass") && hasValue) {
+            options->proxyPass = argv[++i];
+            continue;
+        }
+        if (arg == "--proxy-prefix" && hasValue) {
+            options->proxyPrefix = argv[++i];
             continue;
         }
         std::cerr << "unknown or incomplete argument: " << arg << "\n";
@@ -257,6 +272,7 @@ std::string statusJson(const myself::Metrics::Snapshot& data, size_t ioThreads,
         << "\"requests\":{\"total\":" << data.requestsTotal
         << ",\"rateLimited\":" << data.requestsRateLimited
         << ",\"notModified\":" << data.requestsNotModified
+        << ",\"proxy\":{\"total\":" << data.requestsProxy << ",\"errors\":" << data.requestsProxyErrors << "}"
         << ",\"errors\":" << data.errorsTotal << ",\"byStatusClass\":{\"1xx\":"
         << data.statusClasses[0] << ",\"2xx\":" << data.statusClasses[1]
         << ",\"3xx\":" << data.statusClasses[2] << ",\"4xx\":" << data.statusClasses[3]
@@ -373,6 +389,37 @@ int main(int argc, char* argv[]) {
             return response;
         });
 
+        myself::ProxyOptions proxyOpts;
+        proxyOpts.prefix = options.proxyPrefix;
+        proxyOpts.timeoutSeconds = options.proxyTimeoutSeconds;
+        proxyOpts.enabled = (!options.proxyPass.empty() && options.proxyPass != "none");
+        if (proxyOpts.enabled) {
+            const size_t colon = options.proxyPass.find(':');
+            if (colon != std::string::npos) {
+                proxyOpts.targetHost = options.proxyPass.substr(0, colon);
+                proxyOpts.targetPort = static_cast<uint16_t>(
+                    std::strtoul(options.proxyPass.substr(colon + 1).c_str(), nullptr, 10));
+            } else {
+                proxyOpts.targetHost = options.proxyPass;
+                proxyOpts.targetPort = 80;
+            }
+        }
+        myself::ReverseProxy reverseProxy(proxyOpts);
+        if (reverseProxy.isEnabled()) {
+            LOG_INFO << "reverse proxy enabled: " << reverseProxy.prefix()
+                     << " -> " << reverseProxy.targetHost() << ":" << reverseProxy.targetPort();
+            router.registerPrefixHandler(
+                reverseProxy.prefix(),
+                [&reverseProxy](const myself::HttpRequest& req, const std::string& clientIp) {
+                    myself::metrics::requestProxied();
+                    myself::HttpResponse resp = reverseProxy.forward(req, clientIp);
+                    if (resp.statusCode() >= 500) {
+                        myself::metrics::requestProxyError();
+                    }
+                    return resp;
+                });
+        }
+
         myself::Acceptor acceptor(&baseLoop, "0.0.0.0", options.port);
 
         acceptor.setNewConnectionCallback([&](int connfd, std::string ip, uint16_t peerPort) {
@@ -392,14 +439,14 @@ int main(int argc, char* argv[]) {
             myself::EventLoop* ioLoop = ioPool.nextLoop();
 
             // 连接必须在它所属的 IO 线程里创建并注册事件，否则就是跨线程操作 epoll
-            ioLoop->runInLoop([&router, &workerPool, &registry, &rateLimiter, connfd, ip, peerPort,
+            ioLoop->runInLoop([&router, &workerPool, &registry, &rateLimiter, &reverseProxy, connfd, ip, peerPort,
                                ioLoop, idleSeconds = options.idleTimeoutSeconds] {
                 auto conn = std::make_shared<myself::TcpConnection>(ioLoop, connfd, ip, peerPort);
                 const int fd = conn->fd();
                 auto parser = std::make_shared<myself::HttpParser>();
 
                 conn->setMessageCallback(
-                    [&router, &workerPool, &rateLimiter, parser, ioLoop](
+                    [&router, &workerPool, &rateLimiter, &reverseProxy, parser, ioLoop](
                         const std::shared_ptr<myself::TcpConnection>& c,
                         myself::Buffer* input) {
                         for (;;) {
@@ -459,17 +506,20 @@ int main(int argc, char* argv[]) {
                                 continue;
                             }
 
+                            const bool isProxyReq =
+                                reverseProxy.isEnabled() &&
+                                (request.path().rfind(reverseProxy.prefix(), 0) == 0);
                             const bool offload = workerPool.threadCount() > 0 &&
-                                                 request.path().rfind("/api/", 0) != 0;
+                                                 (isProxyReq || request.path().rfind("/api/", 0) != 0);
                             if (offload) {
-                                // 文件读取等耗时操作交给 worker 线程，回写再回到 IO 线程
-                                workerPool.submit([&router, request, ioLoop, respond] {
-                                    myself::HttpResponse response = router.handle(request);
+                                // 文件读取与反向代理网络请求交给 worker 线程，回写再回到 IO 线程
+                                workerPool.submit([&router, request, peerIp = c->peerIp(), ioLoop, respond] {
+                                    myself::HttpResponse response = router.handle(request, peerIp);
                                     ioLoop->runInLoop(
                                         [respond, response]() mutable { respond(response); });
                                 });
                             } else {
-                                respond(router.handle(request));
+                                respond(router.handle(request, c->peerIp()));
                             }
 
                             if (!keepAlive) {
@@ -503,7 +553,11 @@ int main(int argc, char* argv[]) {
                  << options.ioThreads << " worker threads=" << options.workerThreads
                  << " idle timeout=" << options.idleTimeoutSeconds
                  << "s rate limit=" << options.rateLimitQps
-                 << " qps log level=" << options.logLevel << " www root=" << options.wwwRoot;
+                 << " qps proxy="
+                 << (reverseProxy.isEnabled() ? (reverseProxy.targetHost() + ":" +
+                                                 std::to_string(reverseProxy.targetPort()))
+                                              : "disabled")
+                 << " log level=" << options.logLevel << " www root=" << options.wwwRoot;
 
         baseLoop.loop();
 

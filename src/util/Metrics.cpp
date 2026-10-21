@@ -54,6 +54,14 @@ void Metrics::onRequestNotModified() {
     requestsNotModified_.fetch_add(1);
 }
 
+void Metrics::onRequestProxied() {
+    requestsProxy_.fetch_add(1);
+}
+
+void Metrics::onRequestProxyError() {
+    requestsProxyErrors_.fetch_add(1);
+}
+
 void Metrics::onRequestStarted(MethodKind kind) {
     if (kind >= 0 && kind < kMethodCount) {
         methodCounts_[kind].fetch_add(1);
@@ -103,6 +111,8 @@ void Metrics::reset() {
     requestsTotal_.store(0);
     requestsRateLimited_.store(0);
     requestsNotModified_.store(0);
+    requestsProxy_.store(0);
+    requestsProxyErrors_.store(0);
     errorsTotal_.store(0);
     bytesReadTotal_.store(0);
     bytesWrittenTotal_.store(0);
@@ -158,6 +168,8 @@ Metrics::Snapshot Metrics::snapshot() const {
     result.requestsTotal = requestsTotal_.load();
     result.requestsRateLimited = requestsRateLimited_.load();
     result.requestsNotModified = requestsNotModified_.load();
+    result.requestsProxy = requestsProxy_.load();
+    result.requestsProxyErrors = requestsProxyErrors_.load();
     result.errorsTotal = errorsTotal_.load();
     result.bytesReadTotal = bytesReadTotal_.load();
     result.bytesWrittenTotal = bytesWrittenTotal_.load();
@@ -212,7 +224,13 @@ std::string Metrics::renderPrometheus(uint64_t logLines) const {
         << "myself_requests_rate_limited_total " << data.requestsRateLimited << "\n"
         << "# HELP myself_requests_not_modified_total 条件请求命中返回 304 的次数（省下的整包传输）\n"
         << "# TYPE myself_requests_not_modified_total counter\n"
-        << "myself_requests_not_modified_total " << data.requestsNotModified << "\n";
+        << "myself_requests_not_modified_total " << data.requestsNotModified << "\n"
+        << "# HELP myself_requests_proxy_total 反向代理转发请求总数\n"
+        << "# TYPE myself_requests_proxy_total counter\n"
+        << "myself_requests_proxy_total " << data.requestsProxy << "\n"
+        << "# HELP myself_requests_proxy_errors_total 反向代理转发失败总数\n"
+        << "# TYPE myself_requests_proxy_errors_total counter\n"
+        << "myself_requests_proxy_errors_total " << data.requestsProxyErrors << "\n";
 
     static const char* kClassNames[5] = {"1xx", "2xx", "3xx", "4xx", "5xx"};
     out << "# HELP myself_requests_by_status 按状态码类别统计的请求数\n"
@@ -309,6 +327,18 @@ void requestRateLimited() {
 void requestNotModified() {
     if (Metrics* m = Metrics::global()) {
         m->onRequestNotModified();
+    }
+}
+
+void requestProxied() {
+    if (Metrics* m = Metrics::global()) {
+        m->onRequestProxied();
+    }
+}
+
+void requestProxyError() {
+    if (Metrics* m = Metrics::global()) {
+        m->onRequestProxyError();
     }
 }
 

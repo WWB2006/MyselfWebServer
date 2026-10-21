@@ -2,6 +2,23 @@
 
 本文件按阶段记录可见变化。日期取自仓库提交记录，阶段内的多条提交合并为一条里程碑。
 
+## [1.4.0] - 2026-10-21
+
+微反向代理网关与工业微服务协同 (Reverse Proxy Gateway & IT/OT Integration)。
+
+### Added
+
+- `include/myself/http/ReverseProxy.h` & `src/http/ReverseProxy.cpp`：微型反向代理网关模块，
+  支持路由前缀自动重写（如 `/api/gateway/api/data` 映射至 `/api/data`）
+- 命令行参数 `-P / --proxy-pass <host:port>`（默认 `127.0.0.1:8081`，设为 `none` 关闭）与 `--proxy-prefix <前缀>`（默认 `/api/gateway`）
+- 反向代理安全追踪头注入：`X-Forwarded-For`、`X-Real-IP`、`X-Forwarded-Host`、`X-Forwarded-Proto` 与回传头 `X-Proxy-By: MyselfWebServer`
+- 下游熔断与异常保护：下游连接拒绝或未启动时秒级返回标准 `502 Bad Gateway`；下游超时返回 `504 Gateway Timeout`
+- `Router` 支持前缀路由注册：`registerPrefixHandler`，允许非 GET/HEAD（如 POST、PUT）方法无障碍代理穿透
+- 异步线程隔离：反向代理请求自动派发至计算线程池（`workerPool`）执行阻塞转发，执行完毕通过 `runInLoop` 回到主 IO 线程写回，消除主 Epoll 阻塞风险
+- Prometheus 监控扩展：新增 `myself_requests_proxy_total` 与 `myself_requests_proxy_errors_total` 计数器，`/api/status` 暴露 `proxy` 统计字段
+- 自动化测试：新增 4 项 GTest 单元测试（前缀剥离、保留 query、502 熔断、POST 透传）与 4 项 Pytest 接口端到端测试
+- `docs/stage-13-微反向代理网关与工业协同.md`：架构设计、IT/OT 融合、线程模型与面试问答
+
 ## [1.3.0] - 2026-10-21
 
 静态文件零拷贝传输 (sendfile(2) Zero-Copy)。

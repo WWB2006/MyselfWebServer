@@ -258,7 +258,26 @@ std::string Router::contentTypeFor(const std::string& path) {
     return "application/octet-stream";
 }
 
-HttpResponse Router::handle(const HttpRequest& request) const {
+HttpResponse Router::handle(const HttpRequest& request, const std::string& clientIp) const {
+    if (!isPathSafe(request.path())) {
+        return HttpResponse::badRequest("Bad Request");
+    }
+
+    // 1. 精确匹配（如 /api/status, /metrics）
+    const auto it = handlers_.find(request.path());
+    if (it != handlers_.end()) {
+        return it->second(request);
+    }
+
+    // 2. 前缀匹配（如反向代理网关 /api/gateway/*）
+    for (const auto& item : prefixHandlers_) {
+        const std::string& prefix = item.first;
+        if (request.path().rfind(prefix, 0) == 0) {
+            return item.second(request, clientIp);
+        }
+    }
+
+    // 3. 静态文件（只允许 GET 与 HEAD）
     if (request.method() != HttpRequest::Method::kGet &&
         request.method() != HttpRequest::Method::kHead) {
         HttpResponse response(true);
@@ -266,15 +285,6 @@ HttpResponse Router::handle(const HttpRequest& request) const {
         response.setContentType("text/html; charset=utf-8");
         response.setBody("<html><body><h1>405 Method Not Allowed</h1></body></html>");
         return response;
-    }
-
-    if (!isPathSafe(request.path())) {
-        return HttpResponse::badRequest("Bad Request");
-    }
-
-    const auto it = handlers_.find(request.path());
-    if (it != handlers_.end()) {
-        return it->second(request);
     }
 
     std::string path = request.path();

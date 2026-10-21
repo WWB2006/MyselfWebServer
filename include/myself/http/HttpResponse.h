@@ -66,6 +66,10 @@ public:
     static HttpResponse serviceUnavailable();
     /// 限流保护：请求速率超过令牌桶上限时返回 429 Too Many Requests，并携带 Retry-After
     static HttpResponse tooManyRequests(int retryAfterSeconds = 1);
+    /// 反向代理错误：下游网关不可达或连接拒绝
+    static HttpResponse badGateway(const std::string& reason = "Bad Gateway");
+    /// 反向代理超时：下游网关响应超时
+    static HttpResponse gatewayTimeout(const std::string& reason = "Gateway Timeout");
 
 private:
     int statusCode_{200};
