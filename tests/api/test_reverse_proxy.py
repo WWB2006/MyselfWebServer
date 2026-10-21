@@ -18,7 +18,7 @@ class MockUpstreamHandler(http.server.BaseHTTPRequestHandler):
         MockUpstreamHandler.received_requests.append({
             "method": "GET",
             "path": self.path,
-            "headers": dict(self.headers),
+            "headers": {k.lower(): v for k, v in self.headers.items()},
         })
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -34,7 +34,7 @@ class MockUpstreamHandler(http.server.BaseHTTPRequestHandler):
             "method": "POST",
             "path": self.path,
             "body": body,
-            "headers": dict(self.headers),
+            "headers": {k.lower(): v for k, v in self.headers.items()},
         })
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
