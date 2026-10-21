@@ -34,7 +34,7 @@ SERVER_LOG=""
 
 cleanup() {
     if [[ -n "$SERVER_PID" ]]; then
-        kill "$SERVER_PID" 2>/dev/null || true
+        kill -9 "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
     fi
     [[ -n "$SERVER_LOG" ]] && rm -f "$SERVER_LOG"
@@ -116,6 +116,13 @@ start_server() {
 stop_server() {
     if [[ -n "$SERVER_PID" ]]; then
         kill "$SERVER_PID" 2>/dev/null || true
+        for _ in $(seq 1 5); do
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        kill -9 "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
         SERVER_PID=""
     fi
