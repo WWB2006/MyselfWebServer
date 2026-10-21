@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # 零拷贝 A/B 对比：同一个大文件，分别在 -Z 0（内存缓冲）与默认阈值（sendfile）下下载，
-# 输出耗时与吞吐。
+# 输出耗时与吞吐，并在末尾给出汇总。
 #
 # 用法：./scripts/bench_zero_copy.sh [文件大小MB] [重复次数]
+#
+# 输出约定（便于判断"是跑完了还是断了"）：
+#   - 每组开跑前先打印 "[组 N/2] 标题"，标题出现即代表该组已开始
+#   - 每组失败会打印 "!! ..." 并继续跑下一组，不会静默退出
+#   - 全部结束打印 "压测完成（N 组 × M 次）"
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -48,6 +53,24 @@ if [[ -n "$leftover" ]]; then
     echo "发现其它压测残留文件（可能是并发或异常退出的实例），已忽略、不影响本次结果："
     echo "$leftover" | sed 's/^/  /'
 fi
+
+# ---------------------------------------------------------------- 统计小工具
+
+# median/min/max：入参是空格分隔的数值列表
+median() {
+    printf '%s\n' $1 | sort -g | awk '
+        { v[NR] = $1 }
+        END {
+            if (NR == 0) { print "0"; exit }
+            if (NR % 2) printf "%.4f\n", v[(NR + 1) / 2]
+            else printf "%.4f\n", (v[NR / 2] + v[NR / 2 + 1]) / 2
+        }'
+}
+vmin() { printf '%s\n' $1 | sort -g | head -n 1; }
+vmax() { printf '%s\n' $1 | sort -g | tail -n 1; }
+mbps() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1048576 }'; }
+
+# ---------------------------------------------------------------- 服务生命周期
 
 port_free() {
     ! curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$1/404.html"
@@ -102,39 +125,56 @@ stop_server() {
     fi
 }
 
+# ---------------------------------------------------------------- 用例执行
+
+CASE_LABELS=()
+CASE_THRESHOLDS=()
+CASE_TIMES=()   # 每次的 time_total，空格分隔
+CASE_SPEEDS=()  # 每次的 speed_download（字节/秒），空格分隔
+
 run_case() {
     local label="$1" threshold="$2"
+    local idx=$(( ${#CASE_LABELS[@]} + 1 ))
+
     echo
-    echo "=== $label（-Z $threshold） ==="
+    echo "=== [组 ${idx}/2] ${label}（-Z ${threshold}） ==="
 
     if ! start_server "$threshold"; then
-        echo "  跳过：没有可用端口，先执行 killall webserver 再重试" >&2
+        echo "  !! 跳过：18090-18099 都不可用，先执行 killall webserver 再重试"
         return 1
     fi
 
     # 预热：完整下载一次，不计时（让后续比较的是拷贝路径而不是磁盘）
     if ! curl -sf -o /dev/null "$URL"; then
-        echo "  预热下载失败（HTTP 状态或连接异常）：$URL" >&2
+        echo "  !! 预热下载失败（HTTP 状态或连接异常）：$URL"
         stop_server
         return 1
     fi
 
     local i result code rest total speed
+    local times="" speeds=""
     for i in $(seq 1 "$ROUNDS"); do
-        result="$(curl -sf -o /dev/null -w "%{http_code} %{time_total} %{speed_download}" "$URL")" || {
-            echo "  第 ${i} 次下载失败（HTTP 状态异常或连接中断）" >&2
+        if ! result="$(curl -sf -o /dev/null -w "%{http_code} %{time_total} %{speed_download}" "$URL")"; then
+            echo "  !! 第 ${i} 次下载失败（HTTP 状态异常或连接中断）"
             stop_server
             return 1
-        }
+        fi
         code="${result%% *}"
         rest="${result#* }"
         total="${rest%% *}"
         speed="${rest##* }"
         awk -v c="$code" -v t="$total" -v s="$speed" -v n="$i" \
             'BEGIN { printf "  第 %d 次：HTTP %s  耗时 %.3f s   速度 %.1f MB/s\n", n, c, t, s / 1048576 }'
+        times="${times} ${total}"
+        speeds="${speeds} ${speed}"
     done
 
     stop_server
+
+    CASE_LABELS+=("$label")
+    CASE_THRESHOLDS+=("$threshold")
+    CASE_TIMES+=("${times# }")
+    CASE_SPEEDS+=("${speeds# }")
     return 0
 }
 
@@ -142,10 +182,42 @@ FAILED=0
 run_case "内存缓冲（对照组）" 0 || FAILED=1
 run_case "sendfile 零拷贝" 65536 || FAILED=1
 
+# ---------------------------------------------------------------- 汇总
+
+echo
+echo "==================== A/B 汇总 ===================="
+echo "文件 ${SIZE_MB}MB，每组计时 ${ROUNDS} 次（每次前已预热）"
+
+if [[ ${#CASE_LABELS[@]} -eq 0 ]]; then
+    echo "两组都没跑成，检查上面的 !! 提示。"
+else
+    for i in "${!CASE_LABELS[@]}"; do
+        sp="${CASE_SPEEDS[$i]}"
+        tm="${CASE_TIMES[$i]}"
+        printf '  %s（-Z %s）：中位 %s MB/s（%s s），区间 %s–%s MB/s\n' \
+            "${CASE_LABELS[$i]}" "${CASE_THRESHOLDS[$i]}" \
+            "$(mbps "$(median "$sp")")" "$(median "$tm")" \
+            "$(mbps "$(vmin "$sp")")" "$(mbps "$(vmax "$sp")")"
+    done
+
+    if [[ ${#CASE_LABELS[@]} -eq 2 ]]; then
+        base="$(median "${CASE_SPEEDS[0]}")"
+        zc="$(median "${CASE_SPEEDS[1]}")"
+        awk -v b="$base" -v z="$zc" 'BEGIN {
+            if (b <= 0) { print "  提升：无法计算（对照组速度为 0）"; exit }
+            d = (z - b) / b * 100
+            printf "  提升：%+.1f%%（sendfile 相对内存缓冲，按中位数）\n", d
+        }'
+    fi
+fi
+
 echo
 echo "提示：若两种模式数字接近，说明瓶颈不在拷贝；此时用下面两条命令看内存与 CPU："
 echo "  pidstat -r -p \$(pgrep -f 'webserver -p') 1 3     # RSS：对照组会涨到文件大小量级"
 echo "  perf stat -e cycles,instructions,cache-misses curl -s -o /dev/null \$URL"
 echo "若服务在下载过程中被杀，先看 dmesg | tail 是否有 OOM，再用更小的文件重试："
 echo "  ./scripts/bench_zero_copy.sh 100 3"
+
+echo
+echo "压测完成（${#CASE_LABELS[@]} 组 × ${ROUNDS} 次）"
 exit "$FAILED"
